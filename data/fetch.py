@@ -2,9 +2,9 @@
 """
 Slidysim WR History — comprehensive data fetcher.
 
-Downloads the Google Sheet as xlsx (which preserves hyperlinks, cell notes,
+Downloads the Google Sheet(s) as xlsx (which preserves hyperlinks, cell notes,
 and font colors — none of which the CSV/gviz query exposes) and produces a
-clean wr-data.json + wr-data.js with the FULL record detail:
+clean wr-data.js with the FULL record detail:
 
   - cell values (date, player, time, movecount, tps, control, style,
     solve data, scramble, solution, video, time-minutes)
@@ -14,35 +14,136 @@ clean wr-data.json + wr-data.js with the FULL record detail:
     cell's font color
   - video hyperlinks (youtube) attached to the VIDEO cell
   - Google-Sheets cell NOTES (comments) per cell
+  - platform tag on every record ("exe" or "web") so the in-app
+    Exe / Web / Both tabs can filter or merge records.
+
+MULTI-SHEET (exe + web) SUPPORT:
+  The fetcher downloads BOTH the EXE spreadsheet and the WEB spreadsheet
+  (a separate, parallel workbook for the in-browser version of slidysim).
+  Records from each are tagged with `platform` and merged into a single
+  category list. Categories that exist in only one sheet appear with
+  records from that sheet only; categories in both sheets have records
+  from both, sorted by date. The in-app "Both" tab shows the merged
+  history; "Exe" / "Web" filter by record platform.
+
+FUTURE-PROOF CATEGORY METADATA:
+  Category metadata (id, size, eventType, eventGroup) is now DERIVED from
+  the sheet name itself, not loaded from a stale JSON. Any new category
+  name that matches the pattern "<size>x<size> <event>" is automatically
+  recognized. Supported event types:
+    single        -> eventGroup "single"
+    ao5, ao12, ao25, ao50, ao100, ao200, ... -> eventGroup "average"
+    x10, x42, x100, ...                       -> eventGroup "multi"
+    relay                                      -> eventGroup "relay"
+  New categories like "4x4 ao25" or "5x5 x100" work without code changes.
 
 Re-runnable. Stdlib only.
 """
-import json, re, sys, time, urllib.request, zipfile, io, os
+import json, re, sys, time, urllib.request, zipfile, io, os, html
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SHEET_ID = "1rLoXMkhsMpFkSICEEaRK07D8xwjC-f41tPEqHT4TN8c"
-XLSX_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
 
-# ---- category metadata (id, gid, name, size, eventType, eventGroup) ----
-# Loaded from the existing wr-data.json so we keep the same ids/gids.
-def load_category_meta():
-    with open(os.path.join(HERE, "wr-data.json"), "r", encoding="utf-8") as f:
-        d = json.load(f)
-    return d["categories"]
+# ---- player name canonicalization -----------------------------------------
+# Some players are known by different handles in the spreadsheet vs the
+# community. We normalize them at fetch time so the app never has to special-
+# case two names for the same person. Renames are applied to EVERY text field
+# that could carry a player name (player, victim in notes, etc.). Add more
+# entries here as needed — this is the single source of truth for renames.
+# User: "rename all entries of ben1996123 to 'eggben' and all 'Daanbe'
+# entries to 'Ivy' ... it should be done inside fetch.py script".
+PLAYER_RENAMES = {
+    "ben1996123": "eggben",
+    "Daanbe": "Ivy",
+}
+
+def rename_player(name):
+    """Apply the canonical player-name map. Returns the renamed string."""
+    if not name:
+        return name
+    return PLAYER_RENAMES.get(name, name)
+
+# ---- source spreadsheets ---------------------------------------------------
+# Each entry produces records tagged with `platform`. Add more platforms
+# here (e.g. mobile, vr) without touching the rest of the script.
+SHEETS = [
+    {
+        "id": "exe",
+        "sheet_id": "1rLoXMkhsMpFkSICEEaRK07D8xwjC-f41tPEqHT4TN8c",
+        "platform": "exe",
+        "title": "Slidysim EXE",
+    },
+    {
+        "id": "web",
+        "sheet_id": "1gAlVGTQ5e9UN6ABkgmlysx_NSlu0T-cbrbqGLk1QPMk",
+        "platform": "web",
+        "title": "Slidysim Web",
+    },
+]
+
+# ---- category metadata derivation (future-proof) --------------------------
+# Parses category names like:
+#   "3x3 ao5", "3x3 ao12", "3x3 ao50", "3x3 ao100", "3x3 ao25" (future)
+#   "3x3 x10", "3x3 x42", "3x3 x100" (future)
+#   "3x3 relay"
+#   "4x4 single", "10x10 single"
+# Returns dict with id, name, size, eventType, eventGroup, or None if not
+# recognized (so non-category sheets are skipped).
+def derive_category_meta(name):
+    name = (name or "").strip()
+    m = re.match(r"^(\d+)x(\d+)\s+(.+)$", name, re.I)
+    if not m:
+        return None
+    size = int(m.group(1))
+    rest = m.group(3).strip().lower()
+    if rest == "single":
+        event_type, event_group = "single", "single"
+    elif rest == "relay":
+        event_type, event_group = "relay", "relay"
+    elif rest.startswith("ao"):
+        try:
+            n = int(rest[2:])
+            event_type, event_group = "ao" + str(n), "average"
+        except ValueError:
+            return None
+    elif rest.startswith("x"):
+        try:
+            n = int(rest[1:])
+            event_type, event_group = "x" + str(n), "multi"
+        except ValueError:
+            return None
+    else:
+        return None
+    cat_id = str(size) + "x" + str(size) + "-" + event_type
+    return {
+        "id": cat_id,
+        "name": name,
+        "size": size,
+        "eventType": event_type,
+        "eventGroup": event_group,
+    }
+
+# Sheets in the workbook that are NOT puzzle categories.
+SKIP = {"Master Sheet", "First faster WR", "data", "Sheet1"}
+
+# Display order for event types within a puzzle size.
+EVENT_TYPE_ORDER = {
+    "single": 0, "ao5": 1, "ao12": 2, "ao25": 3, "ao50": 4, "ao100": 5,
+    "ao200": 6, "x10": 7, "x42": 8, "x100": 9, "relay": 10,
+}
 
 # ---------------- download xlsx ----------------
-def download_xlsx(path):
+def download_xlsx(url, path):
     for attempt in range(3):
         try:
-            req = urllib.request.Request(XLSX_URL, headers={"User-Agent": "Mozilla/5.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=60) as r:
                 data = r.read()
             with open(path, "wb") as f:
                 f.write(data)
             return True
         except Exception as e:
-            print(f"  download attempt {attempt+1} failed: {e}", file=sys.stderr)
+            print("  download attempt " + str(attempt + 1) + " failed: " + str(e), file=sys.stderr)
             time.sleep(3)
     return False
 
@@ -69,7 +170,10 @@ def parse_shared_strings(z):
     # each <si>...</si> may contain multiple <t> (rich text runs)
     for si in re.findall(r"<si>(.*?)</si>", raw, re.S):
         texts = re.findall(r"<t[^>]*>(.*?)</t>", si, re.S)
-        strings.append("".join(texts))
+        # Decode XML entities (&lt; &gt; &amp; &quot; &#60; ...) so cell VALUES
+        # display as literal characters, not as the entity string. Same fix as
+        # for cell notes — the spreadsheet XML escapes < > & " in text runs.
+        strings.append(html.unescape("".join(texts)))
     return strings
 
 def parse_styles(z):
@@ -188,7 +292,14 @@ def parse_comments(z, ws_filename):
     for cm in re.findall(r"<comment[^>]*ref=\"([A-Z]+\d+)\"[^>]*>(.*?)</comment>", raw, re.S):
         ref, body = cm
         texts = re.findall(r"<t\b[^>]*>(.*?)</t>", body, re.S)
-        out[ref] = "".join(texts).strip()
+        # Decode XML/HTML entities. Spreadsheet cell notes routinely contain
+        # literal entities like &lt; &gt; &amp; (the source XML escapes them),
+        # and without decoding they'd render as the literal string "&lt;" in
+        # the UI. html.unescape handles &lt; &gt; &amp; &quot; &apos; and
+        # numeric refs like &#60;.
+        # User: "notes something have '<' character, it is currently displayed
+        # as &lt; ... Date is not exact &lt;19.10.2014".
+        out[ref] = html.unescape("".join(texts)).strip()
     return out
 
 def parse_worksheet(z, ws_filename, shared, fonts, xfs):
@@ -324,8 +435,12 @@ def normalize_replay_url(url):
         url = url.replace("://slidysim.github.io/lb?r=", "://slidysim.github.io/replay?r=", 1)
     return url
 
-def build_record(row, headers, hlinks, rels, notes, fonts, xfs):
-    """Build a record dict from a data row. headers = {col_letter: label}."""
+def build_record(row, headers, hlinks, rels, notes, fonts, xfs, platform):
+    """Build a record dict from a data row. headers = {col_letter: label}.
+
+    `platform` is the source spreadsheet tag ("exe" or "web") — set on every
+    record so the in-app Exe / Web / Both tabs can filter or merge.
+    """
     # map header label -> col letter (case-insensitive)
     hl = {v.lower().strip(): k for k, v in headers.items()}
 
@@ -370,7 +485,9 @@ def build_record(row, headers, hlinks, rels, notes, fonts, xfs):
         return notes.get(ref, "")
 
     date_raw = val("Date")
-    player = val("Name") or val("Player")
+    # Apply canonical player renames (ben1996123 -> eggben, Daanbe -> Ivy, ...).
+    # Done at fetch time so the entire app sees only the canonical names.
+    player = rename_player(val("Name") or val("Player"))
     time_v = to_num(val("Time"))
     time_raw = str(val("Time"))
     mv = to_num(val("Movecount"))
@@ -442,6 +559,7 @@ def build_record(row, headers, hlinks, rels, notes, fonts, xfs):
         "dateSortKey": date["dateSortKey"],
         "dayUnknown": date["dayUnknown"],
         "player": player,
+        "platform": platform,  # NEW: per-record platform tag
         "time": time_v,
         "timeRaw": time_raw,
         "timeMinutes": time_min if time_min else None,
@@ -470,56 +588,93 @@ def get_headers(rows):
 
 # ---------------- main ----------------
 def main():
-    print("Downloading xlsx…")
-    xlsx_path = os.path.join(HERE, "sheet.xlsx")
-    if not download_xlsx(xlsx_path):
-        print("FATAL: could not download xlsx", file=sys.stderr)
-        sys.exit(1)
-    print(f"  saved {os.path.getsize(xlsx_path)} bytes")
+    # Map: cat_id -> {"meta": cm, "records": []}
+    cats_by_id = {}
 
-    z = zipfile.ZipFile(xlsx_path)
-    shared = parse_shared_strings(z)
-    fonts, xfs = parse_styles(z)
-    print(f"  sharedStrings: {len(shared)}, fonts: {len(fonts)}, cellXfs: {len(xfs)}")
+    for sheet_info in SHEETS:
+        platform = sheet_info["platform"]
+        sheet_id = sheet_info["sheet_id"]
+        xlsx_url = "https://docs.google.com/spreadsheets/d/" + sheet_id + "/export?format=xlsx"
+        xlsx_path = os.path.join(HERE, "sheet-" + platform + ".xlsx")
+        print("\n=== Fetching [" + platform + "] " + sheet_id + " ===")
+        if not download_xlsx(xlsx_url, xlsx_path):
+            print("WARN: could not download " + platform + " sheet, skipping", file=sys.stderr)
+            continue
+        print("  saved " + str(os.path.getsize(xlsx_path)) + " bytes")
 
-    sheet_map = parse_workbook_sheets(z)
-    print(f"  workbook sheets: {len(sheet_map)}")
+        z = zipfile.ZipFile(xlsx_path)
+        shared = parse_shared_strings(z)
+        fonts, xfs = parse_styles(z)
+        print("  sharedStrings: " + str(len(shared)) + ", fonts: " + str(len(fonts)) + ", cellXfs: " + str(len(xfs)))
 
-    cat_meta = load_category_meta()
-    meta_by_name = {c["name"]: c for c in cat_meta}
+        sheet_map = parse_workbook_sheets(z)
+        print("  workbook sheets: " + str(len(sheet_map)))
 
-    # skip non-category sheets
-    SKIP = {"Master Sheet", "First faster WR", "data", "Sheet1"}
+        skipped = []
+        for name, ws_file in sheet_map:
+            if name in SKIP:
+                skipped.append(name)
+                continue
+            cm = derive_category_meta(name)
+            if not cm:
+                skipped.append(name + " (unrecognized)")
+                continue
+            rows, hlinks = parse_worksheet(z, ws_file, shared, fonts, xfs)
+            rels = parse_sheet_rels(z, ws_file)
+            notes = parse_comments(z, ws_file)
+            headers = get_headers(rows)
+            records = []
+            for row in rows[1:]:  # skip header
+                if not row:
+                    continue
+                rec = build_record(row, headers, hlinks, rels, notes, fonts, xfs, platform)
+                if not rec["player"] and rec["time"] is None:
+                    continue
+                records.append(rec)
+            # reverse to oldest-first (sheet is newest-first)
+            records.reverse()
+            if not records:
+                # Empty sheet (web is work in progress for many categories).
+                # Don't add the category if it has no records — it would just
+                # clutter the UI with empty entries.
+                continue
+            # merge into cats_by_id
+            if cm["id"] not in cats_by_id:
+                cats_by_id[cm["id"]] = {"meta": cm, "records": []}
+            cats_by_id[cm["id"]]["records"].extend(records)
+            print("  [" + platform + "] " + name + ": +" + str(len(records)) + " records")
 
-    categories = []
+        # cleanup the xlsx cache (don't leave binary blobs lying around)
+        try:
+            os.remove(xlsx_path)
+        except OSError:
+            pass
+        if skipped:
+            print("  skipped sheets: " + str(skipped))
+
+    # Sort categories: by size, then eventType order, then eventType name.
+    def sort_key(c):
+        m = c["meta"]
+        return (m["size"], EVENT_TYPE_ORDER.get(m["eventType"], 99), m["eventType"])
+
+    sorted_cats = sorted(cats_by_id.values(), key=sort_key)
+
+    # Build output + global stats.
     total_records = 0
     players = {}
     controls = {}
     styles_count = {}
     date_min = None
     date_max = None
-    skipped = []
+    cat_list = []
 
-    for name, ws_file in sheet_map:
-        if name in SKIP or name not in meta_by_name:
-            skipped.append(name)
-            continue
-        cm = meta_by_name[name]
-        rows, hlinks = parse_worksheet(z, ws_file, shared, fonts, xfs)
-        rels = parse_sheet_rels(z, ws_file)
-        notes = parse_comments(z, ws_file)
-        headers = get_headers(rows)
-        records = []
-        for row in rows[1:]:  # skip header
-            if not row:
-                continue
-            rec = build_record(row, headers, hlinks, rels, notes, fonts, xfs)
-            if not rec["player"] and rec["time"] is None:
-                continue
-            records.append(rec)
-        # reverse to oldest-first (sheet is newest-first)
-        records.reverse()
-        for r in records:
+    for c in sorted_cats:
+        m = c["meta"]
+        recs = c["records"]
+        # Sort merged records by dateSortKey (oldest first). Stable sort
+        # preserves sheet-internal order for same-day records.
+        recs.sort(key=lambda r: r.get("dateSortKey") or 0)
+        for r in recs:
             total_records += 1
             p = r["player"]
             if p:
@@ -533,56 +688,57 @@ def main():
                     date_min = r["dateIso"]
                 if date_max is None or r["dateIso"] > date_max:
                     date_max = r["dateIso"]
-        categories.append({
-            "id": cm["id"],
-            "gid": cm["gid"],
-            "name": cm["name"],
-            "platform": "exe",
-            "size": cm["size"],
-            "eventType": cm["eventType"],
-            "eventGroup": cm["eventGroup"],
-            "recordCount": len(records),
-            "records": records,
+        cat_list.append({
+            "id": m["id"],
+            "name": m["name"],
+            "size": m["size"],
+            "eventType": m["eventType"],
+            "eventGroup": m["eventGroup"],
+            # Top-level platforms: which platforms have records in this category.
+            # Derived from the records themselves — used for display badges.
+            "platforms": sorted(set(r["platform"] for r in recs if r.get("platform"))),
+            "recordCount": len(recs),
+            "records": recs,
         })
-        print(f"  {cm['name']}: {len(records)} records")
+        print("  merged " + m["name"] + ": " + str(len(recs)) + " records [" + ",".join(cat_list[-1]["platforms"]) + "]")
 
     meta = {
-        "source": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit",
+        "source": "https://docs.google.com/spreadsheets/d/" + SHEETS[0]["sheet_id"] + "/edit",
+        "sources": [
+            {"platform": s["platform"], "sheet_id": s["sheet_id"], "title": s["title"]}
+            for s in SHEETS
+        ],
         "title": "Slidysim World Records History",
-        "platform": "exe",
         "fetchedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "totalCategories": len(categories),
+        "totalCategories": len(cat_list),
         "totalRecords": total_records,
         "dateRange": {"min": date_min, "max": date_max},
         "players": dict(sorted(players.items(), key=lambda x: -x[1])),
         "controls": dict(sorted(controls.items(), key=lambda x: -x[1])),
         "styles": styles_count,
     }
-    out = {"meta": meta, "categories": categories}
+    out = {"meta": meta, "categories": cat_list}
 
-    json_path = os.path.join(HERE, "wr-data.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
-    print(f"\nWrote {json_path}: {len(categories)} categories, {total_records} records")
-
+    # ONLY write wr-data.js (no JSON duplication — the .js file is the single
+    # source of truth, loaded via <script src="data/wr-data.js">).
     js_path = os.path.join(HERE, "wr-data.js")
     with open(js_path, "w", encoding="utf-8") as f:
         f.write("window.WR_DATA = ")
         f.write(json.dumps(out, ensure_ascii=False))
         f.write(";\n")
-    print(f"Wrote {js_path}")
-
-    if skipped:
-        print(f"\nSkipped non-category sheets: {skipped}")
+    print("\nWrote " + js_path + ": " + str(len(cat_list)) + " categories, " + str(total_records) + " records")
 
     # quick stats
-    with_replay = sum(1 for c in categories for r in c["records"] if r["hasReplay"])
-    with_video = sum(1 for c in categories for r in c["records"] if r["hasVideo"])
-    with_notes = sum(1 for c in categories for r in c["records"] if r["notes"])
-    green = sum(1 for c in categories for r in c["records"] if r["replayAccurate"] is True)
-    red = sum(1 for c in categories for r in c["records"] if r["replayAccurate"] is False)
-    print(f"\nReplays: {with_replay} (green/accurate: {green}, red/inaccurate: {red})")
-    print(f"Videos: {with_video}, Notes: {with_notes}")
+    with_replay = sum(1 for c in cat_list for r in c["records"] if r["hasReplay"])
+    with_video = sum(1 for c in cat_list for r in c["records"] if r["hasVideo"])
+    with_notes = sum(1 for c in cat_list for r in c["records"] if r["notes"])
+    green = sum(1 for c in cat_list for r in c["records"] if r["replayAccurate"] is True)
+    red = sum(1 for c in cat_list for r in c["records"] if r["replayAccurate"] is False)
+    exe_recs = sum(1 for c in cat_list for r in c["records"] if r.get("platform") == "exe")
+    web_recs = sum(1 for c in cat_list for r in c["records"] if r.get("platform") == "web")
+    print("\nReplays: " + str(with_replay) + " (green/accurate: " + str(green) + ", red/inaccurate: " + str(red) + ")")
+    print("Videos: " + str(with_video) + ", Notes: " + str(with_notes))
+    print("By platform: exe=" + str(exe_recs) + ", web=" + str(web_recs))
 
 if __name__ == "__main__":
     main()

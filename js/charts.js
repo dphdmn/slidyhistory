@@ -12,6 +12,308 @@
   var WR = (window.WR = window.WR || {});
   var U = WR;
 
+  /* ---------- Responsive layout helpers ----------
+   * Charts compute their viewBox from container.clientWidth at render time.
+   * On narrow screens (mobile, or desktop after zoom-in) the fixed margins
+   * and tick counts designed for ~1200px charts eat up so much space that
+   * the plot area becomes tiny and X-axis labels collapse.
+   *
+   * These helpers return width-aware margins / tick targets so text stays
+   * readable at any width. Combined with the debounced resize re-render in
+   * app.js, this fixes: "X axis of pretty much all graphs get collapsed and
+   * broken" and "Some long charts appear extremely tiny, or squished".
+   */
+  function isNarrow(W) { return W < 560; }
+  function isVeryNarrow(W) { return W < 400; }
+  // Line / progression chart margins — slimmer left axis on narrow screens.
+  function lineMargins(W) {
+    if (isVeryNarrow(W)) return { top: 20, right: 12, bottom: 34, left: 46 };
+    if (isNarrow(W))     return { top: 22, right: 16, bottom: 34, left: 52 };
+    return { top: 24, right: 20, bottom: 36, left: 64 };
+  }
+  // How many year ticks to aim for on the X axis. On a 320px chart, 12 ticks
+  // would cram "2013".."2026" into ~24px each (overlap). Reduce to ~6 on
+  // narrow so each label gets ~50px.
+  function yearTickTarget(W) {
+    if (isVeryNarrow(W)) return 5;
+    if (isNarrow(W))     return 7;
+    return 12;
+  }
+  // Active-records chart: on narrow screens the legend should live BELOW the
+  // chart (right margin 20) instead of eating 140px on the right.
+  function activeRecordsMargins(W, singlePlayer) {
+    if (singlePlayer) return { top: 20, right: 20, bottom: 34, left: isNarrow(W) ? 44 : 60 };
+    if (isNarrow(W))   return { top: 20, right: 20, bottom: 34, left: isNarrow(W) ? 44 : 60 };
+    return { top: 20, right: 140, bottom: 36, left: 60 };
+  }
+  // Reign timeline left margin (player name column). 130px is fine on desktop
+  // but eats nearly half a 320px chart. Shrink on narrow.
+  function reignMargins(W) {
+    var left = isVeryNarrow(W) ? 74 : isNarrow(W) ? 92 : 130;
+    return { top: 24, right: 20, bottom: 34, left: left };
+  }
+
+  /* Touch-friendly + / − zoom buttons + ◀ ▶ pan buttons. The scrollwheel zoom
+   * is invisible to touch users; the preset buttons (1y/3y/5y/All) only offer
+   * discrete jumps. These buttons give incremental zoom-in / zoom-out AND
+   * panning left/right so a zoomed-in view can be moved around the chart.
+   * User: "there are no panning left and right options, so it just zooms
+   * somewhere in center and that's it, not very useful without panning".
+   * User: "make sure that + - buttons are displayed on one separate line,
+   * currently on some screens - stays on top line while + is on lower line".
+   *
+   * Layout: all 4 buttons live inside a .zoom-touch-group flex row with
+   * flex-wrap:nowrap, so they NEVER split across lines. The wrapper itself
+   * can wrap to a new line as a unit when the chart card is narrow, but the
+   * 4 buttons stay together.
+   *
+   * `zoomIn` / `zoomOut` / `panLeft` / `panRight` are callbacks that perform
+   * the actual operation + re-render. `panLeft`/`panRight` may be omitted
+   * (e.g. if a chart's data is too small to pan meaningfully) — in that case
+   * only +/− buttons are shown.
+   */
+  function addTouchZoomButtons(controlsWrap, zoomIn, zoomOut, panLeft, panRight) {
+    var sep = document.createElement('span');
+    sep.className = 'zoom-touch-sep';
+    controlsWrap.appendChild(sep);
+
+    // Group: keeps +/− and ◀/▶ together on one line. Without this wrapper,
+    // the buttons were direct children of .chart-controls (flex-wrap:wrap),
+    // and on narrow screens the − button would end a line while + wrapped to
+    // the next. User: "currently on some screens - stays on top line while +
+    // is on lower line".
+    var group = document.createElement('div');
+    group.className = 'zoom-touch-group';
+
+    var minusBtn = document.createElement('button');
+    minusBtn.className = 'zoom-btn zoom-touch-btn';
+    minusBtn.type = 'button';
+    minusBtn.setAttribute('aria-label', 'Zoom out');
+    minusBtn.innerHTML = '&minus;';
+    minusBtn.addEventListener('click', zoomOut);
+    group.appendChild(minusBtn);
+
+    var plusBtn = document.createElement('button');
+    plusBtn.className = 'zoom-btn zoom-touch-btn';
+    plusBtn.type = 'button';
+    plusBtn.setAttribute('aria-label', 'Zoom in');
+    plusBtn.textContent = '+';
+    plusBtn.addEventListener('click', zoomIn);
+    group.appendChild(plusBtn);
+
+    if (panLeft || panRight) {
+      var panSep = document.createElement('span');
+      panSep.className = 'zoom-touch-sep zoom-touch-sep-pan';
+      group.appendChild(panSep);
+
+      if (panLeft) {
+        var leftBtn = document.createElement('button');
+        leftBtn.className = 'zoom-btn zoom-touch-btn zoom-pan-btn';
+        leftBtn.type = 'button';
+        leftBtn.setAttribute('aria-label', 'Pan left');
+        leftBtn.innerHTML = '&larr;';
+        leftBtn.addEventListener('click', panLeft);
+        group.appendChild(leftBtn);
+      }
+      if (panRight) {
+        var rightBtn = document.createElement('button');
+        rightBtn.className = 'zoom-btn zoom-touch-btn zoom-pan-btn';
+        rightBtn.type = 'button';
+        rightBtn.setAttribute('aria-label', 'Pan right');
+        rightBtn.innerHTML = '&rarr;';
+        rightBtn.addEventListener('click', panRight);
+        group.appendChild(rightBtn);
+      }
+    }
+
+    controlsWrap.appendChild(group);
+  }
+
+  // Shared zoom-by-factor logic. Returns the new [start,end] window or null
+  // to signal "show all". `cur` is the current [start,end] or null (all).
+  // `global` is [globalMin, globalMax]. `totalSpan` = globalMax - globalMin.
+  // `factor` < 1 zooms in, > 1 zooms out. `hasPoint(start,end)` checks that at
+  // least one data point falls in the window (prevents empty zoom).
+  function applyZoomFactor(cur, global, totalSpan, factor, hasPoint) {
+    var gMin = global[0], gMax = global[1];
+    var xMin = cur ? cur[0] : gMin;
+    var xMax = cur ? cur[1] : gMax;
+    var curSpan = (xMax - xMin) || totalSpan;
+    var minSpan = Math.max(86400 * 60, totalSpan * 0.03);
+    var newSpan = Math.max(minSpan, Math.min(totalSpan, curSpan * factor));
+    // Center on the middle of the current view.
+    var mid = (xMin + xMax) / 2;
+    var newStart = mid - newSpan / 2;
+    var newEnd = newStart + newSpan;
+    if (newStart < gMin) { newStart = gMin; newEnd = Math.min(gMax, newStart + newSpan); }
+    if (newEnd > gMax) { newEnd = gMax; newStart = Math.max(gMin, newEnd - newSpan); }
+    if (!hasPoint(newStart, newEnd)) return cur; // reject empty zoom
+    if (newEnd - newStart >= totalSpan - 1) return null; // back to "all"
+    return [newStart, newEnd];
+  }
+
+  // Shared pan-by-fraction logic. Returns the new [start,end] window or null
+  // to signal "show all". Shifts the current window left/right by `fraction`
+  // of the current span, clamped to the global range. If the window is null
+  // (showing all), panning does nothing (returns null). `hasPoint(start,end)`
+  // checks that at least one data point falls in the window.
+  // User: "there are no panning left and right options, so it just zooms
+  // somewhere in center and that's it, not very useful without panning".
+  function applyPan(cur, global, totalSpan, fraction, hasPoint) {
+    if (!cur) return cur; // can't pan when showing all
+    var gMin = global[0], gMax = global[1];
+    var xMin = cur[0], xMax = cur[1];
+    var span = xMax - xMin;
+    if (span <= 0) return cur;
+    var shift = span * fraction;
+    var newStart = xMin + shift;
+    var newEnd = xMax + shift;
+    if (newStart < gMin) { newStart = gMin; newEnd = newStart + span; }
+    if (newEnd > gMax) { newEnd = gMax; newStart = newEnd - span; }
+    if (!hasPoint(newStart, newEnd)) return cur; // reject empty pan
+    return [newStart, newEnd];
+  }
+
+  /* Drag-to-pan helper — lets users pan a zoomed-in chart by dragging with
+   * the mouse (hold left button + move) or with a finger (touch + move).
+   * Works in concert with the existing +/− zoom buttons, ◀ ▶ pan buttons,
+   * and scrollwheel zoom.
+   * User: "Panning buttons is good, but i want to also pan by just dragging
+   * my finger on the graph (or by holding mouse)".
+   *
+   * `state` is an object with:
+   *   getZoom()       -> [start,end] or null
+   *   getGlobal()     -> [gMin, gMax]
+   *   getWidth()      -> viewBox W (number)
+   *   getMargins()    -> {left, right}
+   *   hasPoint(a,b)   -> bool (does any data point fall in [a,b]?)
+   *   onPan([s,e])    -> apply the new window + re-render
+   *   onCursor(state) -> 'grab' | 'default' (update cursor when zoom changes)
+   *
+   * Implementation notes:
+   *   - We attach mousedown/touchstart to the container, but move/up to
+   *     document so the drag continues even if the cursor leaves the chart.
+   *   - A 5px threshold distinguishes a drag from a click (so dots remain
+   *     clickable for tooltips / navigation).
+   *   - The SVG element's bounding rect is captured at drag start; we use it
+   *     to convert pixel deltas to time deltas via the chart's inner width.
+   *   - Dragging right shifts the view content right, which means the time
+   *     window shifts LEFT (toward earlier times). Standard map-style UX.
+   *   - Touch: only single-finger drags. Two-finger pinch is left to the
+   *     browser (we don't preventDefault on multi-touch).
+   */
+  function addDragPan(container, state) {
+    var DRAG_THRESHOLD = 5; // px — smaller than a click jitter
+    var drag = null;
+
+    function isInteractiveTarget(el) {
+      // Don't start a drag when the user clicks on a button, a chart dot,
+      // a legend item, the controls row, or a tooltip — those have their
+      // own click handlers. Starting a drag here would break their UX.
+      return !!el.closest('button, .chart-controls, .chart-legend, .chart-legend-below, a, .chart-tooltip, .replay-help-icon');
+    }
+
+    function start(clientX, clientY) {
+      var cur = state.getZoom();
+      if (!cur) return; // not zoomed in — nothing to pan
+      var svgEl = container.querySelector('svg');
+      if (!svgEl) return;
+      var rect = svgEl.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      drag = {
+        startX: clientX,
+        startY: clientY,
+        rectLeft: rect.left,
+        rectWidth: rect.width,
+        curStart: cur[0],
+        curEnd: cur[1],
+        moved: false,
+      };
+    }
+
+    function move(clientX) {
+      if (!drag) return;
+      var dx = clientX - drag.startX;
+      if (!drag.moved && Math.abs(dx) < DRAG_THRESHOLD) return;
+      if (!drag.moved) {
+        drag.moved = true;
+        container.classList.add('dragging');
+      }
+      // Convert pixel delta to time delta.
+      // The viewBox W maps to rect.width screen pixels. The chart's inner
+      // width (iw = W - left - right) corresponds to (iw/W) * rect.width
+      // screen pixels. Time-per-pixel = curSpan / screenIw.
+      var W = state.getWidth();
+      var m = state.getMargins();
+      var iw = W - m.left - m.right;
+      if (iw <= 0) return;
+      var screenIw = drag.rectWidth * (iw / W);
+      if (screenIw <= 0) return;
+      var curSpan = drag.curEnd - drag.curStart;
+      // Dragging RIGHT (dx>0) should move the view content right, which
+      // means the time window shifts LEFT (toward earlier times). So the
+      // shift is NEGATIVE dx.
+      var timeShift = -(dx / screenIw) * curSpan;
+      var g = state.getGlobal();
+      var newStart = drag.curStart + timeShift;
+      var newEnd = drag.curEnd + timeShift;
+      if (newStart < g[0]) { newStart = g[0]; newEnd = newStart + curSpan; }
+      if (newEnd > g[1]) { newEnd = g[1]; newStart = newEnd - curSpan; }
+      if (!state.hasPoint(newStart, newEnd)) return;
+      state.onPan([newStart, newEnd]);
+    }
+
+    function end() {
+      if (drag && drag.moved) {
+        container.classList.remove('dragging');
+      }
+      drag = null;
+    }
+
+    // Mouse
+    container.addEventListener('mousedown', function (e) {
+      if (e.button !== 0) return; // only left button
+      if (isInteractiveTarget(e.target)) return;
+      start(e.clientX, e.clientY);
+      if (drag) {
+        e.preventDefault();
+        // Attach move/up to document so the drag continues outside the chart.
+        var onMove = function (ev) { move(ev.clientX); };
+        var onUp = function () {
+          end();
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      }
+    });
+
+    // Touch — passive:false so we can preventDefault on move to stop page scroll
+    container.addEventListener('touchstart', function (e) {
+      if (e.touches.length !== 1) return; // leave multi-touch to browser
+      if (isInteractiveTarget(e.target)) return;
+      start(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: true });
+    container.addEventListener('touchmove', function (e) {
+      if (!drag || e.touches.length !== 1) return;
+      move(e.touches[0].clientX);
+      if (drag.moved) e.preventDefault();
+    }, { passive: false });
+    container.addEventListener('touchend', function () { end(); });
+    container.addEventListener('touchcancel', function () { end(); });
+
+    // Update cursor class whenever zoom state changes.
+    // The chart's render() calls state.onCursor after every render.
+    // We expose a small API the chart can call.
+    return {
+      setDraggable: function (isZoomed) {
+        if (isZoomed) container.classList.add('draggable');
+        else container.classList.remove('draggable');
+      },
+    };
+  }
+
   /* ---------- SVG helpers ---------- */
   function el(tag, attrs, children) {
     var e = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -143,6 +445,33 @@
     return api;
   }
 
+  /* Hide every chart tooltip currently visible on the page.
+   * Tooltips are position:fixed divs appended to document.body — they are NOT
+   * children of the chart container, so they survive container innerHTML
+   * rebuilds (route changes, time-travel slider drags, etc.). Their normal
+   * hide trigger is the dot/bar `mouseleave` event, but when the container is
+   * rebuilt the hovered element is removed from the DOM without firing
+   * mouseleave, leaving the tooltip floating orphaned on screen.
+   * Calling this at the start of every render() / modal open / search open
+   * guarantees no stale tooltip persists across view changes.
+   * User: "tooltips, they sometimes persist on the screen when we change some
+   * page, while it was visible, and they stay floating until some other
+   * tooltip activated".
+   */
+  function hideAllTooltips() {
+    if (activeTooltip) {
+      activeTooltip.hide();
+      activeTooltip = null;
+    }
+    // Belt-and-suspenders: also clear any orphaned visible tooltips that might
+    // exist from charts whose `activeTooltip` reference was lost (e.g. a chart
+    // whose container was destroyed mid-hover).
+    var visible = document.querySelectorAll('.chart-tooltip.visible');
+    for (var i = 0; i < visible.length; i++) {
+      visible[i].classList.remove('visible');
+    }
+  }
+
   /* ============================================================
    * Line chart — WR progression over time (within a category).
    * X = date, Y = time. Interactive dots with tooltips.
@@ -213,6 +542,38 @@
     hint.className = 'zoom-hint';
     hint.textContent = 'scroll to zoom';
     controlsWrap.appendChild(hint);
+    // Touch + / − zoom buttons + ◀ ▶ pan buttons (work on all devices,
+    // essential on phones). Panning lets users explore a zoomed-in view
+    // instead of being stuck at the centered zoom window.
+    // User: "there are no panning left and right options, so it just zooms
+    // somewhere in center and that's it, not very useful without panning".
+    addTouchZoomButtons(controlsWrap,
+      function zoomIn() {
+        var r = applyZoomFactor(zoomWindow, [globalXMin, globalXMax], totalSpan, 0.6,
+          function (a, b) { return allRecs.some(function (rc) { return rc.dateSortKey >= a && rc.dateSortKey <= b; }); });
+        if (r === null) { zoomWindow = null; clearPresetActive(); presetBtns.forEach(function (b) { if (b.textContent === 'All') b.classList.add('active'); }); }
+        else if (r) { zoomWindow = r; clearPresetActive(); }
+        render();
+      },
+      function zoomOut() {
+        var r = applyZoomFactor(zoomWindow, [globalXMin, globalXMax], totalSpan, 1.6,
+          function (a, b) { return allRecs.some(function (rc) { return rc.dateSortKey >= a && rc.dateSortKey <= b; }); });
+        if (r === null) { zoomWindow = null; clearPresetActive(); presetBtns.forEach(function (b) { if (b.textContent === 'All') b.classList.add('active'); }); }
+        else if (r) { zoomWindow = r; clearPresetActive(); }
+        render();
+      },
+      function panLeft() {
+        if (!zoomWindow) return;
+        var r = applyPan(zoomWindow, [globalXMin, globalXMax], totalSpan, -0.5,
+          function (a, b) { return allRecs.some(function (rc) { return rc.dateSortKey >= a && rc.dateSortKey <= b; }); });
+        if (r) { zoomWindow = r; clearPresetActive(); render(); }
+      },
+      function panRight() {
+        if (!zoomWindow) return;
+        var r = applyPan(zoomWindow, [globalXMin, globalXMax], totalSpan, 0.5,
+          function (a, b) { return allRecs.some(function (rc) { return rc.dateSortKey >= a && rc.dateSortKey <= b; }); });
+        if (r) { zoomWindow = r; clearPresetActive(); render(); }
+      });
     container.appendChild(controlsWrap);
 
     // Wheel zoom handler — attached to container.
@@ -232,7 +593,7 @@
       // Inverse: v = xMin + ((mxSvg - m.left) / iw) * (xMax - xMin)
       // mxSvg = mxRel * W
       var W = opts.width || (container.clientWidth || 600);
-      var m = { left: 64, right: 20 };
+      var m = lineMargins(W);
       var iw = W - m.left - m.right;
       var mxSvg = mxRel * W;
       var xMin, xMax;
@@ -269,7 +630,26 @@
       render();
     }, { passive: false });
 
+    // Drag-to-pan — hold mouse / touch + move to pan the zoomed view.
+    // User: "i want to also pan by just dragging my finger on the graph
+    // (or by holding mouse)".
+    var dragPan = addDragPan(container, {
+      getZoom: function () { return zoomWindow; },
+      getGlobal: function () { return [globalXMin, globalXMax]; },
+      getWidth: function () { return opts.width || (container.clientWidth || 600); },
+      getMargins: function () {
+        var W = opts.width || (container.clientWidth || 600);
+        return lineMargins(W);
+      },
+      hasPoint: function (a, b) {
+        return allRecs.some(function (r) { return r.dateSortKey >= a && r.dateSortKey <= b; });
+      },
+      onPan: function (win) { zoomWindow = win; clearPresetActive(); render(); },
+    });
+
     function render() {
+      // Update drag cursor — only "grab" when zoomed in.
+      dragPan.setDraggable(!!zoomWindow);
       // Remove previous svg + legend + empty-state (keep controls)
       var prevSvg = container.querySelector('svg');
       if (prevSvg) prevSvg.remove();
@@ -319,7 +699,7 @@
 
       var W = opts.width || container.clientWidth || 600;
       var H = opts.height || 320;
-      var m = { top: 24, right: 20, bottom: 36, left: 64 };
+      var m = lineMargins(W);
       var iw = W - m.left - m.right;
       var ih = H - m.top - m.bottom;
 
@@ -352,7 +732,8 @@
       // X axis labels (years) — show EVERY year when span is small enough.
       // User: "Horizontal axis should include more years, currently it does
       // not even show each year".
-      var xTicks = yearTicks(xMin, xMax, 12);
+      // Narrow screens use a smaller tick target so labels don't collapse.
+      var xTicks = yearTicks(xMin, xMax, yearTickTarget(W));
       xTicks.forEach(function (t) {
         var x = xScale(t);
         var yr = new Date(t * 1000).getUTCFullYear();
@@ -573,6 +954,35 @@
     hint.className = 'zoom-hint';
     hint.textContent = 'scroll to zoom';
     controlsWrap.appendChild(hint);
+    // Touch + / − zoom buttons + ◀ ▶ pan buttons (this chart has no preset
+    // buttons, so just toggle zoomWindow directly — same as its wheel handler).
+    // User: "there are no panning left and right options, so it just zooms
+    // somewhere in center and that's it, not very useful without panning".
+    addTouchZoomButtons(controlsWrap,
+      function zoomIn() {
+        var r = applyZoomFactor(zoomWindow, [globalXMin, globalXMax], totalSpan, 0.6,
+          function (a, b) { return allPoints.some(function (p) { return p.t >= a && p.t <= b && !p.synthetic; }); });
+        zoomWindow = r;
+        render();
+      },
+      function zoomOut() {
+        var r = applyZoomFactor(zoomWindow, [globalXMin, globalXMax], totalSpan, 1.6,
+          function (a, b) { return allPoints.some(function (p) { return p.t >= a && p.t <= b && !p.synthetic; }); });
+        zoomWindow = r;
+        render();
+      },
+      function panLeft() {
+        if (!zoomWindow) return;
+        var r = applyPan(zoomWindow, [globalXMin, globalXMax], totalSpan, -0.5,
+          function (a, b) { return allPoints.some(function (p) { return p.t >= a && p.t <= b && !p.synthetic; }); });
+        if (r) { zoomWindow = r; render(); }
+      },
+      function panRight() {
+        if (!zoomWindow) return;
+        var r = applyPan(zoomWindow, [globalXMin, globalXMax], totalSpan, 0.5,
+          function (a, b) { return allPoints.some(function (p) { return p.t >= a && p.t <= b && !p.synthetic; }); });
+        if (r) { zoomWindow = r; render(); }
+      });
     container.appendChild(controlsWrap);
 
     // Wheel zoom handler (same approach as lineChart, with safety checks).
@@ -583,7 +993,7 @@
       var rect = svgEl.getBoundingClientRect();
       var mxRel = (e.clientX - rect.left) / rect.width;
       var W = opts.width || (container.clientWidth || 800);
-      var m = { left: 60, right: opts.singlePlayer ? 20 : 140 };
+      var m = activeRecordsMargins(W, opts.singlePlayer);
       var iw = W - m.left - m.right;
       var mxSvg = mxRel * W;
       var xMin = zoomWindow ? zoomWindow[0] : globalXMin;
@@ -604,7 +1014,26 @@
       render();
     }, { passive: false });
 
+    // Drag-to-pan — hold mouse / touch + move to pan the zoomed view.
+    // User: "i want to also pan by just dragging my finger on the graph
+    // (or by holding mouse)".
+    var dragPan = addDragPan(container, {
+      getZoom: function () { return zoomWindow; },
+      getGlobal: function () { return [globalXMin, globalXMax]; },
+      getWidth: function () { return opts.width || (container.clientWidth || 800); },
+      getMargins: function () {
+        var W = opts.width || (container.clientWidth || 800);
+        return activeRecordsMargins(W, opts.singlePlayer);
+      },
+      hasPoint: function (a, b) {
+        return allPoints.some(function (p) { return p.t >= a && p.t <= b && !p.synthetic; });
+      },
+      onPan: function (win) { zoomWindow = win; render(); },
+    });
+
     function render() {
+      // Update drag cursor — only "grab" when zoomed in.
+      dragPan.setDraggable(!!zoomWindow);
       var prevSvg = container.querySelector('svg');
       if (prevSvg) prevSvg.remove();
       var prevEmpty = container.querySelector('.empty-state');
@@ -612,8 +1041,11 @@
 
       var W = opts.width || container.clientWidth || 800;
       var H = opts.height || 360;
-      // In single-player mode, no legend on the right → smaller right margin.
-      var m = { top: 20, right: opts.singlePlayer ? 20 : 140, bottom: 36, left: 60 };
+      // Responsive margins: on narrow screens the legend moves BELOW the
+      // chart (rendered after the svg), so the right margin shrinks to 20
+      // and the plot area gets the full width. On wide screens the legend
+      // sits in the 140px right gutter as before (preserves desktop look).
+      var m = activeRecordsMargins(W, opts.singlePlayer);
       var iw = W - m.left - m.right;
       var ih = H - m.top - m.bottom;
 
@@ -644,7 +1076,7 @@
       }
 
       // X labels (years)
-      var xTicks = yearTicks(visXMin, visXMax, 12);
+      var xTicks = yearTicks(visXMin, visXMax, yearTickTarget(W));
       xTicks.forEach(function (t) {
         var x = xScale(t);
         svg.appendChild(el('text', { class: 'chart-axis-label', x: x, y: m.top + ih + 16, 'text-anchor': 'middle' }, String(new Date(t * 1000).getUTCFullYear())));
@@ -736,6 +1168,18 @@
               if (ev.kind === 'gain') {
                 if (ev.firstEver) {
                   tt += '<div class="tt-label" style="color:var(--yellow)">★ First documented record</div>';
+                } else if (ev.improved) {
+                  // Self-improvement: the player beat their OWN previous WR.
+                  // This only occurs in the "All Records" (cumulative) version
+                  // of the chart, where every record by the player counts as
+                  // +1. Rephrase from "took WR from [self]" to "Improved own
+                  // record" (cyan) to match the Record History timeline's
+                  // "improved" event type.
+                  // User: "Player can 'Take' record from himself according to
+                  // the graph, fix it by rephrasing tooltip message to
+                  // 'Improve record' just like in Record History 'Improved'
+                  // version events".
+                  tt += '<div class="tt-label" style="color:var(--cyan-bright)">↻ Improved own record</div>';
                 } else if (ev.victim) {
                   var vColor = U.playerColor(ev.victim);
                   tt += '<div class="tt-label">took WR from <b style="color:' + vColor + '">' + U.esc(ev.victim) + '</b></div>';
@@ -797,17 +1241,40 @@
         }, String(lastP.y)));
       });
 
-      // Legend (right side) — ONLY for multi-player mode.
+      // Legend — ONLY for multi-player mode.
       // User: "Remove player name from legend, as here we only have 1 player.
       // for same reason remove '1 player' from this version of the chart".
+      // On narrow screens (m.right === 20, legend has no gutter) render the
+      // legend as an HTML row BELOW the svg so it doesn't overlap the chart.
       if (!opts.singlePlayer) {
-        var legendY = m.top + 4;
-        series.forEach(function (s) {
-          svg.appendChild(el('rect', { x: m.left + iw + 8, y: legendY, width: 12, height: 12, fill: s.color, rx: 2 }));
-          var labText = s.label + ' (' + (s.points.length ? s.points[s.points.length - 1].y : 0) + ')';
-          svg.appendChild(el('text', { class: 'chart-axis-label', x: m.left + iw + 24, y: legendY + 10 }, labText));
-          legendY += 18;
-        });
+        if (isNarrow(W)) {
+          // Remove any previous below-chart legend from a prior render.
+          var prevLegend = container.querySelector('.chart-legend-below');
+          if (prevLegend) prevLegend.remove();
+          var legendDiv = document.createElement('div');
+          legendDiv.className = 'chart-legend chart-legend-below';
+          legendDiv.style.padding = '8px 4px 0 4px';
+          series.forEach(function (s) {
+            var item = document.createElement('span');
+            item.className = 'legend-item';
+            var dot = document.createElement('span');
+            dot.className = 'legend-dot';
+            dot.style.background = s.color;
+            dot.style.color = s.color;
+            item.appendChild(dot);
+            item.appendChild(document.createTextNode(s.label + ' (' + (s.points.length ? s.points[s.points.length - 1].y : 0) + ')'));
+            legendDiv.appendChild(item);
+          });
+          container.appendChild(legendDiv);
+        } else {
+          var legendY = m.top + 4;
+          series.forEach(function (s) {
+            svg.appendChild(el('rect', { x: m.left + iw + 8, y: legendY, width: 12, height: 12, fill: s.color, rx: 2 }));
+            var labText = s.label + ' (' + (s.points.length ? s.points[s.points.length - 1].y : 0) + ')';
+            svg.appendChild(el('text', { class: 'chart-axis-label', x: m.left + iw + 24, y: legendY + 10 }, labText));
+            legendY += 18;
+          });
+        }
       }
 
       container.appendChild(svg);
@@ -884,6 +1351,36 @@
     hint.className = 'zoom-hint';
     hint.textContent = 'scroll to zoom';
     controlsWrap.appendChild(hint);
+    // Touch + / − zoom buttons + ◀ ▶ pan buttons.
+    // User: "there are no panning left and right options, so it just zooms
+    // somewhere in center and that's it, not very useful without panning".
+    addTouchZoomButtons(controlsWrap,
+      function zoomIn() {
+        var r = applyZoomFactor(zoomWindow, [globalXMin, globalXMax], totalSpan, 0.6,
+          function (a, b) { return allPoints.some(function (p) { return p.x >= a && p.x <= b; }); });
+        if (r === null) { zoomWindow = null; clearPresetActive(); presetBtns.forEach(function (b) { if (b.textContent === 'All') b.classList.add('active'); }); }
+        else if (r) { zoomWindow = r; clearPresetActive(); }
+        render();
+      },
+      function zoomOut() {
+        var r = applyZoomFactor(zoomWindow, [globalXMin, globalXMax], totalSpan, 1.6,
+          function (a, b) { return allPoints.some(function (p) { return p.x >= a && p.x <= b; }); });
+        if (r === null) { zoomWindow = null; clearPresetActive(); presetBtns.forEach(function (b) { if (b.textContent === 'All') b.classList.add('active'); }); }
+        else if (r) { zoomWindow = r; clearPresetActive(); }
+        render();
+      },
+      function panLeft() {
+        if (!zoomWindow) return;
+        var r = applyPan(zoomWindow, [globalXMin, globalXMax], totalSpan, -0.5,
+          function (a, b) { return allPoints.some(function (p) { return p.x >= a && p.x <= b; }); });
+        if (r) { zoomWindow = r; clearPresetActive(); render(); }
+      },
+      function panRight() {
+        if (!zoomWindow) return;
+        var r = applyPan(zoomWindow, [globalXMin, globalXMax], totalSpan, 0.5,
+          function (a, b) { return allPoints.some(function (p) { return p.x >= a && p.x <= b; }); });
+        if (r) { zoomWindow = r; clearPresetActive(); render(); }
+      });
     container.appendChild(controlsWrap);
 
     // Wheel zoom handler (same approach as lineChart, with safety checks).
@@ -894,7 +1391,9 @@
       var rect = svgEl.getBoundingClientRect();
       var mxRel = (e.clientX - rect.left) / rect.width;
       var W = opts.width || (container.clientWidth || 800);
-      var m = { left: 60, right: 140 };
+      var m = isNarrow(W)
+        ? { left: isVeryNarrow(W) ? 46 : 52, right: 16 }
+        : { left: 60, right: 140 };
       var iw = W - m.left - m.right;
       var mxSvg = mxRel * W;
       var xMin = zoomWindow ? zoomWindow[0] : globalXMin;
@@ -921,7 +1420,31 @@
       render();
     }, { passive: false });
 
+    // Drag-to-pan — hold mouse / touch + move to pan the zoomed view.
+    // User: "i want to also pan by just dragging my finger on the graph
+    // (or by holding mouse)".
+    function mlMargins(W) {
+      return isNarrow(W)
+        ? { top: 16, right: 16, bottom: 34, left: isVeryNarrow(W) ? 46 : 52 }
+        : { top: 16, right: 140, bottom: 36, left: 60 };
+    }
+    var dragPan = addDragPan(container, {
+      getZoom: function () { return zoomWindow; },
+      getGlobal: function () { return [globalXMin, globalXMax]; },
+      getWidth: function () { return opts.width || (container.clientWidth || 800); },
+      getMargins: function () {
+        var W = opts.width || (container.clientWidth || 800);
+        return mlMargins(W);
+      },
+      hasPoint: function (a, b) {
+        return allPoints.some(function (p) { return p.x >= a && p.x <= b; });
+      },
+      onPan: function (win) { zoomWindow = win; clearPresetActive(); render(); },
+    });
+
     function render() {
+      // Update drag cursor — only "grab" when zoomed in.
+      dragPan.setDraggable(!!zoomWindow);
       var prevSvg = container.querySelector('svg');
       if (prevSvg) prevSvg.remove();
       var prevEmpty = container.querySelector('.empty-state');
@@ -929,7 +1452,8 @@
 
       var W = opts.width || container.clientWidth || 800;
       var H = opts.height || 380;
-      var m = { top: 16, right: 140, bottom: 36, left: 60 };
+      // Responsive margins: legend moves below the chart on narrow screens.
+      var m = mlMargins(W);
       var iw = W - m.left - m.right;
       var ih = H - m.top - m.bottom;
 
@@ -994,7 +1518,7 @@
       });
 
       // X labels — show every year when span is small enough.
-      var xTicks = yearTicks(visXMin, visXMax, 12);
+      var xTicks = yearTicks(visXMin, visXMax, yearTickTarget(W));
       xTicks.forEach(function (t) {
         var x = xScale(t);
         svg.appendChild(el('text', { class: 'chart-axis-label', x: x, y: m.top + ih + 16, 'text-anchor': 'middle' }, String(new Date(t * 1000).getUTCFullYear())));
@@ -1053,13 +1577,34 @@
         });
       });
 
-      // legend (right side)
-      var legendY = m.top + 4;
-      series.forEach(function (s) {
-        svg.appendChild(el('rect', { x: m.left + iw + 8, y: legendY, width: 12, height: 12, fill: s.color, rx: 2 }));
-        svg.appendChild(el('text', { class: 'chart-axis-label', x: m.left + iw + 24, y: legendY + 10 }, s.label));
-        legendY += 18;
-      });
+      // legend — on narrow screens render below the chart as HTML so the
+      // 140px right gutter doesn't crush the plot area.
+      if (isNarrow(W)) {
+        var prevMLLegend = container.querySelector('.chart-legend-below');
+        if (prevMLLegend) prevMLLegend.remove();
+        var mlLegend = document.createElement('div');
+        mlLegend.className = 'chart-legend chart-legend-below';
+        mlLegend.style.padding = '8px 4px 0 4px';
+        series.forEach(function (s) {
+          var item = document.createElement('span');
+          item.className = 'legend-item';
+          var dot = document.createElement('span');
+          dot.className = 'legend-dot';
+          dot.style.background = s.color;
+          dot.style.color = s.color;
+          item.appendChild(dot);
+          item.appendChild(document.createTextNode(s.label));
+          mlLegend.appendChild(item);
+        });
+        container.appendChild(mlLegend);
+      } else {
+        var legendY = m.top + 4;
+        series.forEach(function (s) {
+          svg.appendChild(el('rect', { x: m.left + iw + 8, y: legendY, width: 12, height: 12, fill: s.color, rx: 2 }));
+          svg.appendChild(el('text', { class: 'chart-axis-label', x: m.left + iw + 24, y: legendY + 10 }, s.label));
+          legendY += 18;
+        });
+      }
 
       container.appendChild(svg);
 
@@ -1078,7 +1623,11 @@
     container.innerHTML = '';
     var W = opts.width || container.clientWidth || 600;
     var H = opts.height || Math.max(200, items.length * 28 + 40);
-    var m = { top: 12, right: 16, bottom: 24, left: 140 };
+    // Responsive left margin for the player-name labels: 140px on desktop,
+    // shrinks on mobile so the bars aren't crushed. Player names are short
+    // (≤10 chars) so 88px is enough even at the narrowest widths.
+    var mLeft = isVeryNarrow(W) ? 84 : isNarrow(W) ? 104 : 140;
+    var m = { top: 12, right: 16, bottom: 24, left: mLeft };
     var iw = W - m.left - m.right;
     var ih = H - m.top - m.bottom;
     var barH = Math.min(24, ih / items.length - 4);
@@ -1156,7 +1705,18 @@
     container.innerHTML = '';
     var W = opts.width || container.clientWidth || 600;
     var H = opts.height || 220;
-    var m = { top: 16, right: 16, bottom: 36, left: 40 };
+    // Adaptive bottom margin: when there are MANY bars (e.g. 14 years for
+    // 2013..2026) on a NARROW screen, horizontal "2013" labels collide.
+    // Rotate them -45° and give the labels more vertical room.
+    // User: "Records by Years - X labels still overlap on smaller screens,
+    // there are many years".
+    var n = items.length;
+    // Per-bar slot width (px) inside the chart area. If too narrow for a
+    // 4-char "2013" label (~28px at 11px font), switch to rotated labels.
+    var slotW = (W - 40 - 16) / Math.max(1, n);
+    var rotateLabels = n > 7 && slotW < 36;
+    var bottomMargin = rotateLabels ? 64 : 36;
+    var m = { top: 16, right: 16, bottom: bottomMargin, left: 40 };
     var iw = W - m.left - m.right;
     var ih = H - m.top - m.bottom;
 
@@ -1205,11 +1765,22 @@
       }
       svg.appendChild(bar);
 
-      // X label (year)
-      svg.appendChild(el('text', {
-        class: 'chart-axis-label', x: x + actualBarW / 2, y: m.top + ih + 14,
-        'text-anchor': 'middle',
-      }, String(item.label)));
+      // X label (year). Rotated -45° when bars are narrow so labels never
+      // overlap. text-anchor='end' + rotate makes text read up-and-to-the-right.
+      var labX = x + actualBarW / 2;
+      var labY = m.top + ih + 14;
+      if (rotateLabels) {
+        svg.appendChild(el('text', {
+          class: 'chart-axis-label', x: labX, y: labY,
+          'text-anchor': 'end',
+          transform: 'rotate(-45 ' + labX + ' ' + labY + ')',
+        }, String(item.label)));
+      } else {
+        svg.appendChild(el('text', {
+          class: 'chart-axis-label', x: labX, y: labY,
+          'text-anchor': 'middle',
+        }, String(item.label)));
+      }
 
       // Value on top of bar — ALWAYS show, even for tiny bars.
       // User: "missing numbers above bars for small values".
@@ -1295,6 +1866,35 @@
     hint.className = 'zoom-hint';
     hint.textContent = 'scroll to zoom';
     controlsWrap.appendChild(hint);
+    // Touch + / − zoom buttons + ◀ ▶ pan buttons.
+    // User: "Same for Whol Held the record and all other graphs used in the project".
+    addTouchZoomButtons(controlsWrap,
+      function zoomIn() {
+        var r = applyZoomFactor(zoomWindow, [globalTMin, globalTMax], totalSpan, 0.6,
+          function (a, b) { return reigns.some(function (rg) { return rg.endTime >= a && rg.startTime <= b; }); });
+        if (r === null) { zoomWindow = null; clearPresetActive(); presetBtns.forEach(function (b) { if (b.textContent === 'All') b.classList.add('active'); }); }
+        else if (r) { zoomWindow = r; clearPresetActive(); }
+        render();
+      },
+      function zoomOut() {
+        var r = applyZoomFactor(zoomWindow, [globalTMin, globalTMax], totalSpan, 1.6,
+          function (a, b) { return reigns.some(function (rg) { return rg.endTime >= a && rg.startTime <= b; }); });
+        if (r === null) { zoomWindow = null; clearPresetActive(); presetBtns.forEach(function (b) { if (b.textContent === 'All') b.classList.add('active'); }); }
+        else if (r) { zoomWindow = r; clearPresetActive(); }
+        render();
+      },
+      function panLeft() {
+        if (!zoomWindow) return;
+        var r = applyPan(zoomWindow, [globalTMin, globalTMax], totalSpan, -0.5,
+          function (a, b) { return reigns.some(function (rg) { return rg.endTime >= a && rg.startTime <= b; }); });
+        if (r) { zoomWindow = r; clearPresetActive(); render(); }
+      },
+      function panRight() {
+        if (!zoomWindow) return;
+        var r = applyPan(zoomWindow, [globalTMin, globalTMax], totalSpan, 0.5,
+          function (a, b) { return reigns.some(function (rg) { return rg.endTime >= a && rg.startTime <= b; }); });
+        if (r) { zoomWindow = r; clearPresetActive(); render(); }
+      });
     container.appendChild(controlsWrap);
 
     // Wheel zoom handler.
@@ -1305,7 +1905,7 @@
       var rect = svgEl.getBoundingClientRect();
       var mxRel = (e.clientX - rect.left) / rect.width;
       var W = container.clientWidth || 900;
-      var m = { left: 130, right: 20 };
+      var m = reignMargins(W);
       var iw = W - m.left - m.right;
       var mxSvg = mxRel * W;
       var xMin = zoomWindow ? zoomWindow[0] : globalTMin;
@@ -1335,7 +1935,31 @@
       render();
     }, { passive: false });
 
+    // Drag-to-pan — hold mouse / touch + move to pan the zoomed view.
+    // User: "i want to also pan by just dragging my finger on the graph
+    // (or by holding mouse)".
+    var dragPan = addDragPan(container, {
+      getZoom: function () { return zoomWindow; },
+      getGlobal: function () { return [globalTMin, globalTMax]; },
+      getWidth: function () {
+        var W = container.clientWidth || 900;
+        if (W < 200) W = 900;
+        return W;
+      },
+      getMargins: function () {
+        var W = container.clientWidth || 900;
+        if (W < 200) W = 900;
+        return reignMargins(W);
+      },
+      hasPoint: function (a, b) {
+        return reigns.some(function (rg) { return rg.endTime >= a && rg.startTime <= b; });
+      },
+      onPan: function (win) { zoomWindow = win; clearPresetActive(); render(); },
+    });
+
     function render() {
+      // Update drag cursor — only "grab" when zoomed in.
+      dragPan.setDraggable(!!zoomWindow);
       var prevSvg = container.querySelector('svg');
       if (prevSvg) prevSvg.remove();
       var prevEmpty = container.querySelector('.empty-state');
@@ -1344,7 +1968,7 @@
       var W = container.clientWidth || 900;
       if (W < 200) W = 900;
       var H = Math.max(160, playerOrder.length * 32 + 60);
-      var m = { top: 24, right: 20, bottom: 36, left: 130 };
+      var m = reignMargins(W);
       var iw = W - m.left - m.right;
       var ih = H - m.top - m.bottom;
 
@@ -1375,16 +1999,21 @@
       var svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H });
       svg.style.width = '100%';
 
-      // X axis: year ticks
-      var xTicks = yearTicks(tMin, tMax);
+      // X axis: year ticks (responsive target on narrow screens)
+      var xTicks = yearTicks(tMin, tMax, yearTickTarget(W));
+      // On narrow screens shrink the axis label font so years don't overlap.
+      var axisFontSize = isVeryNarrow(W) ? 9 : 10;
       xTicks.forEach(function (t) {
         var x = xScale(t);
         if (x < m.left || x > m.left + iw) return;
         svg.appendChild(el('line', { class: 'chart-grid-line', x1: x, y1: m.top, x2: x, y2: m.top + ih }));
-        svg.appendChild(el('text', { class: 'chart-axis-label', x: x, y: m.top + ih + 16, 'text-anchor': 'middle' }, String(new Date(t * 1000).getUTCFullYear())));
+        svg.appendChild(el('text', { class: 'chart-axis-label', x: x, y: m.top + ih + 16, 'text-anchor': 'middle', 'font-size': String(axisFontSize) }, String(new Date(t * 1000).getUTCFullYear())));
       });
 
       // Y axis: player lane labels — colored and clickable.
+      // On narrow screens shrink the label font so long player names still
+      // fit in the reduced left margin without being clipped.
+      var labFontSize = isVeryNarrow(W) ? 9 : 10;
       playerOrder.forEach(function (p, i) {
         var y = m.top + i * laneH + laneH / 2;
         if (i % 2 === 0) {
@@ -1393,7 +2022,7 @@
         var lab = el('text', {
           class: 'chart-axis-label clickable', x: m.left - 6, y: y + 4,
           'text-anchor': 'end',
-          style: 'fill:' + U.playerColor(p) + ';font-weight:600',
+          style: 'fill:' + U.playerColor(p) + ';font-weight:600;font-size:' + labFontSize + 'px',
           'data-player': p,
         }, p);
         if (opts.onPlayerClick) {
@@ -1428,8 +2057,22 @@
         }
         bar.addEventListener('mouseenter', function (e) {
           var days = rg.durationDays;
+          // When time-travelling, an open-ended (current) reign ends at the
+          // cutoff date, not real "now" — show that date so the tooltip is
+          // honest about the time-travelled state.
+          var endLabel;
+          if (rg.endRec) {
+            endLabel = U.fmtDate(rg.endRec);
+          } else if (U.isTimeTravelling()) {
+            // Build a DD Mon YYYY label from the cutoff timestamp.
+            var d = new Date(U.getNow() * 1000);
+            var ms = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            endLabel = d.getUTCDate() + ' ' + ms[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+          } else {
+            endLabel = 'now';
+          }
           var tt = '<div style="color:' + color + ';font-weight:700">' + U.esc(rg.player) + '</div>' +
-            '<div class="tt-label">' + U.fmtDate(rg.record) + ' → ' + (rg.endRec ? U.fmtDate(rg.endRec) : 'now') + '</div>' +
+            '<div class="tt-label">' + U.fmtDate(rg.record) + ' → ' + endLabel + '</div>' +
             '<div class="tt-value">' + U.fmtTime(rg.bestTime) + ' · ' + U.fmtDuration(days) + '</div>';
           if (rg.record.movecount != null) tt += '<div class="tt-label">moves: <b style="color:var(--text)">' + U.fmtMovecount(rg.record.movecount, false) + '</b></div>';
           if (rg.record.tps != null) tt += '<div class="tt-label">tps: <b style="color:var(--text)">' + U.fmtTps(rg.record.tps) + '</b></div>';
@@ -1571,14 +2214,21 @@
     H = labelH + ys.length * (cellH + gap) + 20;
 
     var svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'xMidYMid meet' });
-    // Center the SVG inside its container (user: "previously perfectly centered,
-    // you moved it to the left"). Using xMidYMid meet + display:block + margin:auto
-    // centers the SVG both horizontally and vertically when the container is
-    // wider/taller than the SVG's intrinsic size.
-    svg.setAttribute('width', '100%');
-    svg.style.maxWidth = W + 'px';
+    // Use the natural intrinsic width (W px) — do NOT shrink to fit the
+    // container. The .heatmap-wrap parent has overflow-x:auto so wide
+    // heatmaps (e.g. Player × Category with 45 cols × 24px = 1100+ px)
+    // scroll horizontally instead of being squished into unreadable cells.
+    // User: "Player X Category Heatmap - very tiny on mobile, have too zoom
+    // in (there are 45 categories horizontally)".
+    // User: "Activity Heatmap - overflows off screen to the right, also its
+    // still shifted weirdly even on PC, maybe some weird interaction with
+    // legend?" — the shift was caused by SVG being centered via margin:auto
+    // while the legend (a separate flex row) was left-aligned. Now both are
+    // children of a single .heatmap-inner inline-block wrapper that's
+    // centered via text-align:center on the container, so the legend stays
+    // aligned with the SVG at every width.
+    svg.setAttribute('width', W);
     svg.style.display = 'block';
-    svg.style.margin = '0 auto';
     // FIX: use text-anchor='start' so rotated text extends UP-and-right
     // (away from cells). Previously text-anchor='end' made text extend
     // DOWN into the cells. Anchor at cell-center; for -90° text reads
@@ -1666,7 +2316,17 @@
       }
     });
 
-    container.appendChild(svg);
+    // Wrap SVG + legend in a single .heatmap-inner inline-block. This keeps
+    // the legend horizontally aligned with the SVG (both inside the same
+    // wrapper) instead of the SVG being centered while the legend hugs the
+    // left edge of the container. User: "still shifted weirdly even on PC,
+    // maybe some weird interaction with legend?".
+    // inline-block + text-align:center on the parent centers the wrapper when
+    // the SVG is narrower than the container; when the SVG is wider, the
+    // wrapper overflows and the container's overflow-x:auto scrolls.
+    var inner = document.createElement('div');
+    inner.className = 'heatmap-inner';
+    inner.appendChild(svg);
 
     // legend
     if (opts.showLegend !== false) {
@@ -1680,8 +2340,9 @@
         legend.appendChild(sw);
       }
       legend.innerHTML += '<span>More</span>';
-      container.appendChild(legend);
+      inner.appendChild(legend);
     }
+    container.appendChild(inner);
   }
 
   function heatColor(intensity) {
@@ -1724,4 +2385,5 @@
   WR.heatmap = heatmap;
   WR.niceTimeTicks = niceTimeTicks;
   WR.fmtTick = fmtTick;
+  WR.hideAllTooltips = hideAllTooltips;
 })();

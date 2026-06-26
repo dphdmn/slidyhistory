@@ -26,6 +26,16 @@
   // Records version of this chart ... Rival / All version".
   var compareChartMode = 'active';
 
+  // Whether at least one render has completed. The loading spinner ("Loading
+  // world record data…" / "Loading…") is only shown on the very first render
+  // (initial app boot). On subsequent re-renders — most notably the frequent
+  // re-renders triggered by the time-travel slider drag — we keep the existing
+  // content visible until the new content is ready, instead of flashing a
+  // loading state on every drag tick.
+  // User: "remove that flashing 'Loading world record data' nonsense whenever
+  // i drag it, its really distracting".
+  var hasRenderedOnce = false;
+
   /* ---------- Container ---------- */
   function container() { return document.getElementById('view-container'); }
 
@@ -129,7 +139,7 @@
             <div class="card-title"><span class="neon">Nemesis</span> Matrix</div>
             <div class="card-actions"><span class="badge badge-pink">row sniped column · click names</span></div>
           </div>
-          <div id="nemesis-matrix"></div>
+          <div id="nemesis-matrix" class="nemesis-matrix-wrap"></div>
         </div>
         <div class="card">
           <div class="card-header">
@@ -141,7 +151,7 @@
               </div>
             </div>
           </div>
-          <div id="activity-heatmap" style="overflow-x:auto"></div>
+          <div id="activity-heatmap" class="heatmap-wrap"></div>
         </div>
       </div>
 
@@ -156,7 +166,7 @@
             <span class="badge badge-gray" id="playercat-count">${Math.min(15, stats.totalPlayers)} players</span>
           </div>
         </div>
-        <div id="player-cat-heatmap" style="overflow-x:auto"></div>
+        <div id="player-cat-heatmap" class="heatmap-wrap"></div>
       </div>
     `;
 
@@ -478,7 +488,7 @@
    *     other tables, not just 'it exists' mark".
    * ============================================================ */
   function renderWRSummaryTable(container, cats) {
-    var nowSec = Date.now() / 1000;
+    var nowSec = U.getNow();
     // Build rows in the SAME ORDER as the input `cats` array — which is the
     // data-file order. The default sort key 'order' preserves this.
     var rows = cats.map(function (cat, idx) {
@@ -549,7 +559,7 @@
         return sortState.dir === 'asc' ? ' ▲' : ' ▼';
       }
 
-      var html = '<div class="table-scroll"><table class="wr-table sortable-table"><thead><tr>' +
+      var html = '<div class="table-scroll"><table class="wr-table sortable-table cat-list-table"><thead><tr>' +
         '<th class="sortable-th" data-sort="catName">Category' + sortIcon('catName') + '</th>' +
         '<th class="sortable-th" data-sort="holder">Holder' + sortIcon('holder') + '</th>' +
         '<th class="num sortable-th" data-sort="time">Time' + sortIcon('time') + '</th>' +
@@ -578,7 +588,7 @@
         var videoHtml = videoCell(wr);
         var notesHtml = notesCell(wr);
         html += '<tr data-cat="' + r.cat.id + '" style="cursor:pointer">' +
-          '<td class="player">' + esc(r.cat.name) + '</td>' +
+          '<td class="cat-name-cell">' + esc(r.cat.name) + '</td>' +
           '<td class="player"><a data-player="' + esc(wr.player) + '" style="color:' + holderColor + '">' + esc(wr.player) + '</a></td>' +
           '<td class="num time text-cyan">' + U.fmtTime(wr.time) + '</td>' +
           '<td class="num">' + U.fmtMovecount(wr.movecount, U.isSingle(r.cat)) + '</td>' +
@@ -640,7 +650,7 @@
 
   /* Export all current WRs as a CSV summary. */
   function exportSummaryCsv(cats) {
-    var nowSec = Date.now() / 1000;
+    var nowSec = U.getNow();
     var rows = [['Category', 'Size', 'Holder', 'Time (s)', 'Time (display)', 'Movecount', 'TPS', 'Control', 'Style', 'Replay', 'Video', 'Notes', 'Days Held', 'Date']];
     cats.forEach(function (cat) {
       var s = U.getCategoryStats(cat, state.platform);
@@ -686,7 +696,7 @@
           size: cat.size,
           eventType: cat.eventType,
           eventGroup: cat.eventGroup,
-          platform: cat.platform,
+          platforms: cat.platforms || [],
           records: recs.map(function (r) {
             var clean = {};
             // Copy all original fields, excluding runtime annotations.
@@ -883,7 +893,7 @@
     var notesCombined = [];
     if (wr.notes && wr.notes.trim()) notesCombined.push(wr.notes);
     if (solveNote) notesCombined.push('Solve data: ' + solveNote);
-    var nowSec = Date.now() / 1000;
+    var nowSec = U.getNow();
     var daysAgo = wr.dateSortKey ? Math.max(0, Math.round((nowSec - wr.dateSortKey) / 86400)) : null;
 
     var html = '<div class="current-record-card' + (wr.videoUrl ? ' has-video' : '') + '">';
@@ -1037,7 +1047,7 @@
     // Column order: #, Date, Player, Time, Movecount, TPS, Δ, Control, Style, Replay, Video, Notes
     // (delta moved AFTER TPS, before Control — user request.
     //  "Time (min)" removed — duplicate of Time — user request.)
-    var html = '<div class="table-scroll"><table class="wr-table"><thead><tr>' +
+    var html = '<div class="table-scroll"><table class="wr-table full-record-table"><thead><tr>' +
       '<th class="rank">#</th><th>Date</th><th>Player</th><th class="num">Time</th>' +
       '<th class="num">Movecount</th><th class="num">TPS</th><th class="num">Δ vs prev</th>' +
       '<th>Control</th><th>Style</th>' +
@@ -1061,7 +1071,7 @@
       html += '<tr>' +
         '<td class="rank">' + chronologicalNum + '</td>' +
         '<td class="date">' + U.fmtDate(r) + '</td>' +
-        '<td class="player"><a data-player="' + esc(r.player) + '" style="color:' + color + '">' + esc(r.player) + '</a></td>' +
+        '<td class="player"><a data-player="' + esc(r.player) + '" style="color:' + color + '">' + esc(r.player) + '</a> ' + platformCell(r) + '</td>' +
         '<td class="num time">' + U.fmtTime(r.time) + '</td>' +
         '<td class="num">' + U.fmtMovecount(r.movecount, isSingle) + '</td>' +
         '<td class="num text-dim">' + (r.tps != null ? U.fmtTps(r.tps) : '—') + '</td>' +
@@ -1272,6 +1282,19 @@
     var ytId = U.youtubeId(url);
     if (ytId) return '<span class="badge badge-pink">YouTube</span>';
     return '<span class="badge badge-gray">video</span>';
+  }
+
+  /* Platform tag (Web/Exe) — ONLY rendered in the "both" merged view.
+   * Each record carries a `platform` field ("exe" or "web"). In exe-only or
+   * web-only views every visible record is the same platform, so the tag
+   * would be redundant noise — we return '' in those cases.
+   * User: "include tags like 'Web / Exe' (only in 'Both' merged view), only
+   * changes should be done for 'Both' view, not affecting exe and web-only
+   * representations".
+   */
+  function platformCell(r) {
+    if (state.platform !== 'both' || !r.platform) return '';
+    return '<span class="platform-tag platform-' + esc(r.platform) + '" title="Record set on the ' + esc(r.platform) + ' platform">' + esc(r.platform) + '</span>';
   }
 
   /* Color-coded control cell — Tablet/Mouse/Keyboard (only 3 types). */
@@ -1541,7 +1564,7 @@
     } else {
       WR.multiLineChart(document.getElementById('compare-chart'), series);
       var tableEl = document.getElementById('compare-table');
-      var html = '<div class="table-scroll"><table class="wr-table"><thead><tr>' +
+      var html = '<div class="table-scroll"><table class="wr-table compare-records-table"><thead><tr>' +
         '<th>Category</th><th class="num">Records</th><th class="num">Current WR</th><th>Holder</th>' +
         '<th class="num">Moves</th><th class="num">TPS</th><th>Control</th><th>Style</th><th>' + replayHeaderCell() + '</th><th>Video</th>' +
         '</tr></thead><tbody>';
@@ -1552,7 +1575,7 @@
         var s = U.getCategoryStats(cat, state.platform);
         var wr = s.currentWR;
         html += '<tr>' +
-          '<td class="player" style="color:' + color + '">' + esc(cat.name) + '</td>' +
+          '<td class="cat-name-cell" style="color:' + color + '">' + esc(cat.name) + '</td>' +
           '<td class="num">' + s.recordCount + '</td>' +
           '<td class="num time">' + (wr ? U.fmtTime(wr.time) : '—') + '</td>' +
           '<td class="player" style="color:' + (wr ? U.playerColor(wr.player) : '#888') + '">' + (wr ? esc(wr.player) : '—') + '</td>' +
@@ -1766,10 +1789,11 @@
         </div>
         <div class="card">
           <div class="card-header">
-            <div class="card-title"><span class="neon">Snipes</span> Timeline</div>
+            <div class="card-title"><span class="neon">Record</span> History</div>
             <div class="card-actions">
               <span class="badge" style="color:var(--delta-up);border-color:rgba(0,255,170,0.4);background:rgba(0,255,170,0.08)">wins</span>
               <span class="badge" style="color:var(--red);border-color:rgba(255,68,68,0.4);background:rgba(255,68,68,0.08)">losses</span>
+              <span class="badge" style="color:var(--cyan);border-color:rgba(0,188,212,0.4);background:rgba(0,188,212,0.08)">improved</span>
             </div>
           </div>
           <div id="player-snipes-timeline"></div>
@@ -1844,7 +1868,7 @@
           el.innerHTML = '<div class="empty-state">No current WRs</div>';
           return;
         }
-        var html = '<div class="table-scroll"><table class="wr-table"><thead><tr>' +
+        var html = '<div class="table-scroll"><table class="wr-table player-all-records"><thead><tr>' +
           '<th class="rank">#</th><th>Category</th><th class="num">Time</th><th class="num">Moves</th><th class="num">TPS</th>' +
           '<th>Control</th><th>Style</th><th>' + replayHeaderCell() + '</th><th>Video</th><th>Notes</th><th>Date</th>' +
           '</tr></thead><tbody>';
@@ -1862,7 +1886,7 @@
           var chronNum = curRecs.length - i;
           html += '<tr style="cursor:pointer" data-cat="' + cat.id + '">' +
             '<td class="rank">' + chronNum + '</td>' +
-            '<td class="player">' + esc(cat.name) + '</td>' +
+            '<td class="cat-name-cell">' + esc(cat.name) + ' ' + platformCell(wr) + '</td>' +
             '<td class="num time">' + U.fmtTime(wr.time) + '</td>' +
             '<td class="num">' + U.fmtMovecount(wr.movecount, U.isSingle(cat)) + '</td>' +
             '<td class="num text-dim">' + (wr.tps != null ? U.fmtTps(wr.tps) : '—') + '</td>' +
@@ -1895,7 +1919,7 @@
         var allRecs = records.details.map(function (d) {
           return d.rec;
         }).sort(function (a, b) { return (b.dateSortKey || 0) - (a.dateSortKey || 0); });
-        var rhtml = '<div class="table-scroll"><table class="wr-table"><thead><tr><th class="rank">#</th><th>Date</th><th>Category</th><th class="num">Time</th><th class="num">Moves</th><th class="num">TPS</th><th>Control</th><th>Style</th><th>' + replayHeaderCell() + '</th><th>Video</th><th>Notes</th></tr></thead><tbody>';
+        var rhtml = '<div class="table-scroll"><table class="wr-table player-all-records"><thead><tr><th class="rank">#</th><th>Date</th><th>Category</th><th class="num">Time</th><th class="num">Moves</th><th class="num">TPS</th><th>Control</th><th>Style</th><th>' + replayHeaderCell() + '</th><th>Video</th><th>Notes</th></tr></thead><tbody>';
         allRecs.forEach(function (r, i) {
           var cat = U.getCategory(r._catId);
           // Chronological #: oldest = 1, newest = N. Table is newest-first,
@@ -1904,7 +1928,7 @@
           rhtml += '<tr>' +
             '<td class="rank">' + chronNum + '</td>' +
             '<td class="date">' + U.fmtDate(r) + '</td>' +
-            '<td class="player"><a data-cat="' + r._catId + '" style="cursor:pointer">' + esc(r._catName) + '</a></td>' +
+            '<td class="cat-name-cell"><a data-cat="' + r._catId + '" style="cursor:pointer">' + esc(r._catName) + '</a> ' + platformCell(r) + '</td>' +
             '<td class="num time">' + U.fmtTime(r.time) + '</td>' +
             '<td class="num">' + U.fmtMovecount(r.movecount, cat ? U.isSingle(cat) : false) + '</td>' +
             '<td class="num text-dim">' + (r.tps != null ? U.fmtTps(r.tps) : '—') + '</td>' +
@@ -1948,10 +1972,20 @@
       });
     }
 
-    // ---- Snipes Timeline ----
+    // ---- Record History timeline (was: "Snipes Timeline") ----
+    // Renamed per user: "Detailed players info - Snipes Timeline - should be
+    // renamed to Record History". Now combines THREE event types:
+    //   - win   : sniped a rival (or first-ever record)  [green, +1]
+    //   - loss  : was sniped by a rival                   [red,   -1]
+    //   - improved : beat the player's OWN previous WR    [cyan,  ±0]
+    // User: "This timeline now also includes moments when player improved his
+    // own record, colored with some 3rd color. So win - lost - improved.
+    // counter icon (21 -> 20 / 20 -> 21) does not change when record is
+    // improved (just shows one number '20')".
     var snipeEl = document.getElementById('player-snipes-timeline');
     var wasSniped = U.getPlayerWasSniped(name, state.platform);
-    // Combine win + loss events into a single timeline.
+    var improvements = U.getPlayerImprovements(name, state.platform);
+    // Combine win + loss + improved events into a single timeline.
     var events = [];
     snipes.details.forEach(function (d) {
       events.push({
@@ -1975,21 +2009,36 @@
         delta: -1,
       });
     });
+    improvements.details.forEach(function (d) {
+      // Improved: same player beat their own record. Active-count delta is 0
+      // (they already held the record, they just lowered the time). The
+      // counter therefore shows a SINGLE number (no before→after arrow).
+      events.push({
+        type: 'improved',
+        date: d.rec.dateSortKey || 0,
+        rec: d.rec,
+        prev: d.prev,
+        cat: d.cat,
+        opponent: null,
+        opponentRole: null,
+        delta: 0,
+      });
+    });
 
     // Pre-compute the active-count at each event. We sort events ascending by
     // date, walk through maintaining a running count, and tag each event with
     // its before/after counts. For same-day events we still process them in
-    // order (so 2 wins on the same day show 10→11 and 11→12).
+    // order (so 2 wins on the same day show 10→11 and 11→12). Improved events
+    // have delta=0 so before===after — the UI shows a single number for them.
     var eventsAsc = events.slice().sort(function (a, b) { return a.date - b.date; });
     var running = 0;
-    var countByKey = {}; // date|delta|catId -> {before, after}
+    // Use a unique sequential id as the key (avoids collisions when multiple
+    // same-day same-cat events occur, e.g. two improvements in one day).
     eventsAsc.forEach(function (ev) {
       var before = running;
       running += ev.delta;
       var after = running;
-      // Key by date + delta + catId + opponent to uniquely identify the event.
-      var key = ev.date + '|' + ev.delta + '|' + ev.cat.id + '|' + (ev.opponent || '');
-      countByKey[key] = { before: before, after: after };
+      ev._cnt = { before: before, after: after };
     });
 
     if (events.length) {
@@ -1999,9 +2048,9 @@
       events.forEach(function (ev) {
         var rec = ev.rec;
         var oppColor = ev.opponent ? U.playerColor(ev.opponent) : '#888';
-        var itemCls = ev.type === 'loss' ? 'snipe-loss' : 'snipe-win';
-        var tagCls = ev.type === 'loss' ? 'tag-loss' : (ev.type === 'first' ? 'tag-first' : 'tag-win');
-        var tagText = ev.type === 'loss' ? 'LOST' : (ev.type === 'first' ? 'FIRST' : 'WIN');
+        var itemCls = ev.type === 'loss' ? 'snipe-loss' : (ev.type === 'improved' ? 'snipe-improved' : 'snipe-win');
+        var tagCls = ev.type === 'loss' ? 'tag-loss' : (ev.type === 'first' ? 'tag-first' : (ev.type === 'improved' ? 'tag-improved' : 'tag-win'));
+        var tagText = ev.type === 'loss' ? 'LOST' : (ev.type === 'first' ? 'FIRST' : (ev.type === 'improved' ? 'IMPROVED' : 'WIN'));
         var bodyText;
         if (ev.type === 'first') {
           bodyText = '<span class="text-yellow">★ First documented record</span>';
@@ -2009,18 +2058,38 @@
           bodyText = ev.opponent
             ? 'sniped <b style="color:' + oppColor + '">' + esc(ev.opponent) + '</b>'
             : '<span class="text-dim">first record</span>';
+        } else if (ev.type === 'improved') {
+          // Show the time improvement delta vs the player's own previous WR.
+          var impDelta = U.fmtDelta(rec.time, ev.prev ? ev.prev.time : null);
+          bodyText = 'improved own record' +
+            (impDelta.text && impDelta.text !== '—' ? ' <span class="delta-' + impDelta.cls + '" style="font-weight:700">' + impDelta.text + '</span>' : '');
         } else {
           bodyText = 'sniped by <b style="color:' + oppColor + '">' + esc(ev.opponent) + '</b>';
         }
-        // Lookup before/after counts for this event.
-        var key = ev.date + '|' + ev.delta + '|' + ev.cat.id + '|' + (ev.opponent || '');
-        var cnt = countByKey[key] || { before: '?', after: '?' };
-        var counterHtml = '<span class="snipe-counter" title="active records held">' + cnt.before + '→' + cnt.after + '</span>';
+        // Counter: for improved events (delta=0) show a SINGLE number (no
+        // before→after arrow). For win/loss show before→after.
+        // User: "counter icon (21 -> 20 / 20 -> 21) does not change when record
+        // is improved (just shows one number '20')".
+        var cnt = ev._cnt || { before: '?', after: '?' };
+        var counterHtml;
+        if (ev.type === 'improved') {
+          counterHtml = '<span class="snipe-counter snipe-counter-improved" title="active records held (unchanged — self-improvement)">' + cnt.after + '</span>';
+        } else {
+          counterHtml = '<span class="snipe-counter" title="active records held">' + cnt.before + '→' + cnt.after + '</span>';
+        }
+        // Platform tag — ONLY shown in "both" merged view. Each record carries
+        // a `platform` field ("exe" or "web"). In exe/web-only views the tag
+        // is redundant (every record is the same platform) so we hide it.
+        var platformTag = '';
+        if (state.platform === 'both' && rec.platform) {
+          platformTag = '<span class="platform-tag platform-' + esc(rec.platform) + '" title="Record set on the ' + esc(rec.platform) + ' platform">' + esc(rec.platform) + '</span>';
+        }
         shtml += '<div class="snipe-item ' + itemCls + '" data-cat="' + esc(ev.cat.id) + '">' +
           '<div class="snipe-date">' + U.fmtDate(rec) + '</div>' +
           '<div class="snipe-body">' +
             '<div class="snipe-head">' +
               '<span class="snipe-cat">' + esc(ev.cat.name) + '</span>' +
+              platformTag +
               '<span class="snipe-time text-cyan">' + U.fmtTime(rec.time) + '</span>' +
               counterHtml +
             '</div>' +
@@ -2050,7 +2119,7 @@
         });
       });
     } else {
-      snipeEl.innerHTML = '<div class="empty-state">No snipe events</div>';
+      snipeEl.innerHTML = '<div class="empty-state">No record events</div>';
     }
 
     // victims & rivals — combined into compact tables (no scroll wrapper).
@@ -2087,6 +2156,11 @@
    * Record detail modal
    * ============================================================ */
   function showRecordModal(rec, cat) {
+    // Hide any chart tooltip — the user just clicked a dot/bar to open this
+    // modal, and that tooltip would otherwise float on top of the modal
+    // overlay (tooltips are position:fixed on document.body with a high
+    // z-index).
+    if (WR.hideAllTooltips) WR.hideAllTooltips();
     var overlay = document.getElementById('modal-overlay');
     var title = document.getElementById('modal-title');
     var body = document.getElementById('modal-body');
@@ -2101,6 +2175,12 @@
     if (rec.tps != null) html += statBox('TPS', U.fmtTps(rec.tps));
     if (rec.control) html += statBox('Control', esc(rec.control));
     if (rec.style) html += statBox('Style', esc(rec.style));
+    // Platform — always shown in the modal (the modal is a detail view, so
+    // knowing which platform the record was set on is useful context even in
+    // exe/web-only views). Uses the same platform-tag styling as tables.
+    if (rec.platform) {
+      html += statBox('Platform', '<span class="platform-tag platform-' + esc(rec.platform) + '">' + esc(rec.platform) + '</span>');
+    }
     html += '</div>';
 
     if (rec.videoUrl) {
@@ -2176,9 +2256,25 @@
     state.route = route || 'overview';
     state.params = params || {};
     var c = container();
-    c.innerHTML = '<div class="loading-state"><div class="spinner"></div><p>Loading…</p></div>';
-    // defer render to next tick so the loading state paints first
+    // Hide any chart tooltip currently visible — tooltips are position:fixed
+    // divs on document.body and survive the container rebuild below, so
+    // without this they'd float orphaned on the new view until another
+    // tooltip happens to show. Covers route changes AND time-travel slider
+    // drags (which call render() on each debounced apply).
+    // User: "tooltips, they sometimes persist on the screen when we change
+    // some page, while it was visible".
+    if (WR.hideAllTooltips) WR.hideAllTooltips();
+    // Only paint the loading spinner on the very first render (initial boot).
+    // On subsequent re-renders (e.g. time-travel slider drags, which fire many
+    // debounced re-renders), keep the existing content visible until the new
+    // content is ready — flashing "Loading…" on every drag tick is distracting.
+    if (!hasRenderedOnce) {
+      c.innerHTML = '<div class="loading-state"><div class="spinner"></div><p>Loading…</p></div>';
+    }
+    // defer render to next tick so the loading state paints first (first render
+    // only) / so the browser keeps the old frame until the new one is ready.
     requestAnimationFrame(function () {
+      hasRenderedOnce = true;
       try {
         switch (state.route) {
           case 'overview': renderOverview(); break;

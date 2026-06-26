@@ -24,6 +24,26 @@
   var DAY = 86400;
   var NOW = Date.now() / 1000;
 
+  /* ---------- Time-travel cutoff ----------
+   * "Teleport back in time" feature: when set (a unix-seconds timestamp),
+   * ALL record-filtering functions exclude records dated AFTER this moment.
+   * This lets the user view the leaderboard / stats / charts "as of" a past
+   * date — e.g. see who held the 3x3 ao5 WR in March 2021, what the player
+   * leaderboard looked like at end of 2020, etc.
+   *
+   * null  = live (no cutoff, show everything up to today)
+   * number = only show records with dateSortKey <= cutoff
+   *
+   * The cutoff is applied at the lowest level (filterRecords / filterCats) so
+   * every downstream computation (snipes, reigns, leaderboards, charts, nemesis
+   * matrix, heatmaps, current-WRs-held, global stats) automatically reflects
+   * the time-traveled state — no need to thread the parameter through every
+   * function. User: "teleport back in time of the leaderboard (or select
+   * precise date with the calendar) to see leaderboard and all stats/players
+   * etc. as it was for example 2021 and not 2026".
+   */
+  var TIME_CUTOFF = null;
+
   /* ---------- Tier palette (from openslidy) ----------
    * 10 tiers. Used for player colors and rank badges.
    * alpha (best) -> kappa (worst).
@@ -102,30 +122,16 @@
   }
 
   /* ---------- Data loading ----------
-   * Primary: window.WR_DATA (set by data/wr-data.js script tag).
-   * Fallback: fetch data/wr-data.json if the script tag failed to load
-   * (can happen in some iframe / new-tab contexts).
+   * Primary (and only): window.WR_DATA, set by data/wr-data.js script tag
+   * in index.html. We removed the JSON fallback to avoid keeping a 4MB
+   * duplicate file in the repo. If the script tag fails to load, the user
+   * sees the loading state and a retry button (handled by app.js init).
    */
   function loadData() {
     if (window.WR_DATA) {
       return processData(window.WR_DATA);
     }
-    // Fallback: fetch the JSON. This is synchronous-style but we need to
-    // throw so app.js shows the error; the caller (app.js init) handles it.
-    // Since fetch is async, we can't block — but we can try a synchronous
-    // XHR as a last resort (deprecated but works for same-origin).
-    try {
-      var xhr = new XMLHttpRequest();
-      xhr.open('GET', 'data/wr-data.json', false); // synchronous
-      xhr.send();
-      if (xhr.status === 200) {
-        var data = JSON.parse(xhr.responseText);
-        return processData(data);
-      }
-      throw new Error('WR_DATA not loaded and fetch failed: ' + xhr.status);
-    } catch (e) {
-      throw new Error('WR_DATA not loaded: ' + e.message);
-    }
+    throw new Error('WR_DATA not loaded — check that data/wr-data.js is reachable');
   }
 
   function processData(data) {
@@ -186,18 +192,94 @@
   function getCategories() { return CATEGORIES; }
   function getCategory(id) { return CAT_BY_ID[id] || null; }
 
-  /* ---------- Platform filter ---------- */
+  /* ---------- Platform filter ----------
+   * Each record carries its own `platform` tag ("exe" or "web"), set by
+   * fetch.py. A category may have records from BOTH platforms (e.g. 3x3 ao12
+   * has 21 exe + 2 web records). filterCats returns categories that have at
+   * least one record of the requested platform; filterRecords returns just
+   * those records.
+   *
+   * "both" view = the COMBINED WORLD RECORD timeline. The two platforms keep
+   * independent record histories in the raw data (cat.records is NEVER
+   * mutated), but the "both" VIEW merges them into a single lower-envelope
+   * frontier: only records that were the BEST (lowest) combined time at the
+   * moment they were set are shown. A record that improved its own platform's
+   * WR but was slower than the other platform's current WR is NOT a combined
+   * world record and is excluded from this view.
+   *
+   * User: "it appears that record got worse (0.736) entry, but it's just exe
+   * record, which was better compared to exe (0.745s), but not better than
+   * web record (0.731s)... should be removed exe 0.736s entry, because it's
+   * not the actual combined record. However, be careful, as it might just
+   * happened that exe record IS actually saving time over some web record at
+   * the moment in time."
+   *
+   * Example (3x3 ao100, both view, date-ascending):
+   *   0.745 exe  ← first valid, best=0.745, INCLUDE
+   *   0.731 web  ← 0.731 < 0.745, best=0.731, INCLUDE
+   *   0.736 exe  ← 0.736 < 0.731? NO → EXCLUDE (never the combined WR)
+   *   0.715 web  ← 0.715 < 0.731, best=0.715, INCLUDE
+   *   0.707 web  ← 0.707 < 0.715, best=0.707, INCLUDE
+   * If an exe 0.700 later appeared it WOULD be included (0.700 < 0.731) —
+   * the frontier correctly keeps cross-platform improvements.
+   */
   function filterCats(platform) {
-    if (platform === 'both') return CATEGORIES.slice();
+    // Time-travel cutoff: a category is included only if it has at least one
+    // record matching the platform AND within the time window. A category
+    // first played in 2023 is invisible when viewing 2020 — exactly what
+    // "as of <date>" means.
+    var hasCutoff = TIME_CUTOFF != null;
+    if (platform === 'both') {
+      return CATEGORIES.filter(function (c) {
+        return c.records.some(function (r) {
+          if (hasCutoff && (r.dateSortKey || 0) > TIME_CUTOFF) return false;
+          return true;
+        });
+      });
+    }
     return CATEGORIES.filter(function (c) {
-      return (c.platform || 'exe') === platform;
+      return c.records.some(function (r) {
+        if ((r.platform || 'exe') !== platform) return false;
+        if (hasCutoff && (r.dateSortKey || 0) > TIME_CUTOFF) return false;
+        return true;
+      });
     });
   }
   function filterRecords(cat, platform) {
-    if (platform === 'both') return cat.records;
-    return cat.records.filter(function (r) {
-      return (r.platform || 'exe') === platform;
+    var hasCutoff = TIME_CUTOFF != null;
+    if (platform === 'both') {
+      // Lower-envelope (combined WR frontier). Sort by date ascending, walk
+      // through keeping a running minimum time, include a record only if its
+      // time is strictly less than the running minimum. Stable sort preserves
+      // sheet-internal order for same-day records. Null-time records skipped.
+      //
+      // Time-travel: the cutoff is applied BEFORE the frontier computation, so
+      // the frontier is built only from records that existed at/before the
+      // cutoff moment. A record set after the cutoff is invisible — the user
+      // sees the combined-WR history exactly as it stood on that date.
+      var all = cat.records.slice();
+      if (hasCutoff) {
+        all = all.filter(function (r) { return (r.dateSortKey || 0) <= TIME_CUTOFF; });
+      }
+      all.sort(function (a, b) { return (a.dateSortKey || 0) - (b.dateSortKey || 0); });
+      var frontier = [];
+      var best = Infinity;
+      for (var i = 0; i < all.length; i++) {
+        var r = all[i];
+        if (r.time == null) continue;
+        if (r.time < best) {
+          frontier.push(r);
+          best = r.time;
+        }
+      }
+      return frontier;
+    }
+    var recs = cat.records.filter(function (r) {
+      if ((r.platform || 'exe') !== platform) return false;
+      if (hasCutoff && (r.dateSortKey || 0) > TIME_CUTOFF) return false;
+      return true;
     });
+    return recs;
   }
 
   /* ---------- Defensive formatting ---------- */
@@ -356,13 +438,18 @@
   }
 
   // Reigns: each record starts a reign lasting until the next record (or now).
+  // Time-travel: when a cutoff is set, the "current" (last) reign ends at the
+  // cutoff moment, not at actual NOW — because at the cutoff date, that player
+  // was still the holder and had been holding since their record date. Using
+  // NOW would inflate the reign duration by the years between cutoff and today.
   function computeReigns(recs) {
     var reigns = [];
+    var endTimeNow = TIME_CUTOFF != null ? TIME_CUTOFF : NOW;
     for (var i = 0; i < recs.length; i++) {
       var r = recs[i];
       if (r.time == null) continue;
       var startTime = r.dateSortKey || 0;
-      var endTime = (i < recs.length - 1) ? (recs[i+1].dateSortKey || startTime) : NOW;
+      var endTime = (i < recs.length - 1) ? (recs[i+1].dateSortKey || startTime) : endTimeNow;
       reigns.push({
         player: r.player,
         record: r,
@@ -637,6 +724,38 @@
           details.push({ cat: c, rec: sn.rec, sniper: sn.sniper, first: false });
         }
       });
+    });
+    return { count: details.length, details: details };
+  }
+
+  /* ---------- Player self-improvements ----------
+   * Records where the player improved their OWN previous WR in a category
+   * (i.e. prevPlayer === name). These are NOT snipes (no rival was overtaken)
+   * and NOT losses (the player still holds the record). They are a distinct
+   * "improved" event type for the unified Record History timeline.
+   *
+   * User: "This timeline now also includes moments when player improved his
+   * own record, colored with some 3rd color. So win - lost - improved.
+   * counter icon (21 -> 20 / 20 -> 21) does not change when record is
+   * improved (just shows one number '20')".
+   *
+   * Returns details [{ cat, rec, prev }] — the NEW (improving) record plus a
+   * reference to the previous record by the same player (for delta display).
+   */
+  function getPlayerImprovements(name, platform) {
+    var cats = filterCats(platform);
+    var details = [];
+    cats.forEach(function (c) {
+      var recs = filterRecords(c, platform);
+      for (var i = 1; i < recs.length; i++) {
+        var r = recs[i];
+        var prev = recs[i - 1];
+        if (r.time == null) continue;
+        // Improvement: same player beat their own previous record.
+        if (r.player === name && prev.player === name) {
+          details.push({ cat: c, rec: r, prev: prev });
+        }
+      }
     });
     return { count: details.length, details: details };
   }
@@ -936,11 +1055,21 @@
           var prevPlayer = i > 0 ? recs[i - 1].player : null;
           // Metadata stored on the EVENT (not on the shared record) — same
           // fix as getPlayerRecordsHeldOverTime, so Compare mode works.
+          // `improved` flag: true when the player beat their OWN previous
+          // record (prevPlayer === name). In the "All Records" cumulative
+          // view every record by the player counts as +1, but a self-
+          // improvement is NOT a "took WR from [victim]" event — the tooltip
+          // rephrases it to "Improved own record" (cyan) to match the Record
+          // History timeline's "improved" event type.
+          // User: "Player can 'Take' record from himself according to the
+          // graph, fix it by rephrasing tooltip message to 'Improve record'
+          // just like in Record History 'Improved' version events".
           events.push({
             t: r.dateSortKey, delta: +1, rec: r, cat: c, kind: 'gain',
             victim: prevPlayer,
             sniper: null,
             firstEver: (prevPlayer === null),
+            improved: (prevPlayer === name),
           });
         }
       }
@@ -968,6 +1097,45 @@
     return { events: events, points: points, current: points.length ? points[points.length - 1].y : 0 };
   }
 
+  /* ---------- Time-travel cutoff (public API) ----------
+   * setTimeCutoff(ts): set the cutoff (unix seconds). null/undefined = live.
+   * getTimeCutoff(): returns current cutoff (null = live).
+   * clearTimeCutoff(): shortcut for setTimeCutoff(null).
+   * isTimeTravelling(): true when a cutoff is active.
+   * getCutoffDateRange(): returns {min, max} timestamps for the slider bounds,
+   *   derived from the data's dateRange meta (+ NOW as the live endpoint).
+   */
+  function setTimeCutoff(ts) {
+    TIME_CUTOFF = (ts == null || isNaN(ts)) ? null : ts;
+  }
+  function getTimeCutoff() { return TIME_CUTOFF; }
+  function clearTimeCutoff() { TIME_CUTOFF = null; }
+  function isTimeTravelling() { return TIME_CUTOFF != null; }
+
+  // The "effective now" for relative-time computations ("X days ago", "days
+  // held"). When time-travelling, this is the cutoff moment — because at the
+  // selected past date, "now" was the cutoff, not the real present day.
+  // Using real NOW would inflate "days held" by the years between the cutoff
+  // and today, which is wrong when viewing history "as of" a past date.
+  // User: "'Days ago' counters are not fixed according to selected older date,
+  // which covers 'Current WRs summary', and also current record block in
+  // details, and other place relative days difference is mentioned".
+  function getNow() {
+    return TIME_CUTOFF != null ? TIME_CUTOFF : NOW;
+  }
+
+  // Slider bounds: from the earliest record date to max(NOW, latest record).
+  // The rightmost slider position = "live" (no cutoff). If NOW is somehow
+  // before the latest record (clock skew), fall back to the latest record so
+  // the live position always includes every record.
+  function getCutoffDateRange() {
+    var meta = DATA && DATA.meta && DATA.meta.dateRange ? DATA.meta.dateRange : {};
+    var minTs = meta.min ? Math.floor(Date.parse(meta.min + 'T00:00:00Z') / 1000) : 0;
+    var maxTs = meta.max ? Math.floor(Date.parse(meta.max + 'T00:00:00Z') / 1000) : NOW;
+    var liveTs = Math.max(NOW, maxTs);
+    return { min: minTs, max: maxTs, live: liveTs };
+  }
+
   /* ---------- Exports ---------- */
   WR.loadData = loadData;
   WR.esc = esc;
@@ -979,6 +1147,12 @@
   WR.getCategory = getCategory;
   WR.filterCats = filterCats;
   WR.filterRecords = filterRecords;
+  WR.setTimeCutoff = setTimeCutoff;
+  WR.getTimeCutoff = getTimeCutoff;
+  WR.clearTimeCutoff = clearTimeCutoff;
+  WR.isTimeTravelling = isTimeTravelling;
+  WR.getNow = getNow;
+  WR.getCutoffDateRange = getCutoffDateRange;
   WR.playerColor = playerColor;
   WR.TIER_COLORS = TIER_COLORS;
   WR.TIER_ORDER = TIER_ORDER;
@@ -1009,6 +1183,7 @@
   WR.getRecordsByYear = getRecordsByYear;
   WR.getSnipesByYear = getSnipesByYear;
   WR.getPlayerWasSniped = getPlayerWasSniped;
+  WR.getPlayerImprovements = getPlayerImprovements;
   WR.getPlayerRecordsHeldOverTime = getPlayerRecordsHeldOverTime;
   WR.getPlayerTotalRecordsOverTime = getPlayerTotalRecordsOverTime;
   WR.gridsDimension = gridsDimension;

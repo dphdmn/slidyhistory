@@ -30,9 +30,27 @@
         </button>
         <div class="platform-toggle" role="group" aria-label="Platform filter" id="platform-toggle">
           <button class="plt-btn active" data-platform="exe" title="Desktop app records">Exe</button>
-          <button class="plt-btn" data-platform="web" title="Web records (future)">Web</button>
-          <button class="plt-btn" data-platform="both" title="Both platforms">Both</button>
+          <button class="plt-btn" data-platform="web" title="Web (in-browser) records">Web</button>
+          <button class="plt-btn" data-platform="both" title="Both platforms merged together">Both</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Time-travel slider: full-width, lets you "teleport" the leaderboard
+         back to any date. Drag the slider for fast scrubbing, or pick a precise
+         date with the calendar input. Click "Live" to return to now. -->
+    <div class="time-travel-bar" id="time-travel-bar">
+      <div class="time-travel-inner">
+        <div class="tt-label-block" id="tt-label-block">
+          <svg class="tt-clock-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span class="tt-date-text" id="tt-date-text">Live</span>
+        </div>
+        <div class="tt-slider-wrap">
+          <input type="range" id="tt-slider" class="tt-slider" min="0" max="100" step="1" value="100" aria-label="Time travel slider">
+          <div class="tt-ticks" id="tt-ticks" aria-hidden="true"></div>
+        </div>
+        <input type="date" id="tt-date" class="tt-date-picker" title="Pick a precise date" aria-label="Pick a date">
+        <button class="tt-live-btn" id="tt-live-btn" title="Return to live (current time)">Live</button>
       </div>
     </div>
   </header>
@@ -49,7 +67,7 @@
       <div class="footer-left">
         <span class="footer-pill" id="footer-stats">—</span>
         <span class="footer-sep">·</span>
-        <span>Data: <a href="https://docs.google.com/spreadsheets/d/1rLoXMkhsMpFkSICEEaRK07D8xwjC-f41tPEqHT4TN8c/edit" target="_blank" rel="noopener">Google Sheets</a></span>
+        <span>Data: <a href="https://docs.google.com/spreadsheets/d/1rLoXMkhsMpFkSICEEaRK07D8xwjC-f41tPEqHT4TN8c/edit" target="_blank" rel="noopener">EXE</a> · <a href="https://docs.google.com/spreadsheets/d/1gAlVGTQ5e9UN6ABkgmlysx_NSlu0T-cbrbqGLk1QPMk/edit" target="_blank" rel="noopener">Web</a></span>
       </div>
       <div class="footer-right">
         <span>Collected by dphdmn &amp; vovker · with help from eggben &amp; Ivy</span>

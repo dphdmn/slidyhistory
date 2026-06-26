@@ -118,12 +118,15 @@
     }).slice(0, topN || 12);
 
     container.innerHTML = '';
-    var wrap = document.createElement('div');
-    wrap.style.overflowX = 'auto';
 
     var grid = document.createElement('div');
     grid.className = 'nemesis-matrix';
-    grid.style.gridTemplateColumns = '120px repeat(' + victims.length + ', 1fr) 60px';
+    // Use minmax(48px, 1fr) so victim columns have a MINIMUM width of 48px.
+    // Previously `1fr` columns squished to fit the container — which meant
+    // the matrix never overflowed and the parent's overflow-x:auto never
+    // engaged, so the matrix was unscrollable even when wider than the card.
+    // User: "Nemesis matrix - still not scrollable".
+    grid.style.gridTemplateColumns = '120px repeat(' + victims.length + ', minmax(48px, 1fr)) 60px';
 
     // header row — victim names clickable
     grid.appendChild(cell('Sniper \\ Victim', 'header'));
@@ -162,8 +165,7 @@
       grid.appendChild(cell(String(rowTotal), 'count'));
     });
 
-    wrap.appendChild(grid);
-    container.appendChild(wrap);
+    container.appendChild(grid);
   }
 
   function cell(text, cls) {
