@@ -598,7 +598,7 @@
         var notesHtml = notesCell(wr);
         html += '<tr data-cat="' + r.cat.id + '" style="cursor:pointer">' +
           '<td class="cat-name-cell">' + esc(r.cat.name) + '</td>' +
-          '<td class="player"><a data-player="' + esc(wr.player) + '" style="color:' + holderColor + '">' + esc(wr.player) + '</a></td>' +
+          '<td class="player"><a data-player="' + esc(wr.player) + '" style="color:' + holderColor + '">' + esc(wr.player) + '</a> ' + platformCell(wr) + '</td>' +
           '<td class="num time text-cyan">' + U.fmtTime(wr.time) + '</td>' +
           '<td class="num">' + U.fmtMovecount(wr.movecount, U.isSingle(r.cat)) + '</td>' +
           '<td class="num text-dim">' + (wr.tps != null ? U.fmtTps(wr.tps) : '—') + '</td>' +
@@ -660,7 +660,7 @@
   /* Export all current WRs as a CSV summary. */
   function exportSummaryCsv(cats) {
     var nowSec = U.getNow();
-    var rows = [['Category', 'Size', 'Holder', 'Time (s)', 'Time (display)', 'Movecount', 'TPS', 'Control', 'Style', 'Replay', 'Video', 'Notes', 'Days Held', 'Date']];
+    var rows = [['Category', 'Size', 'Holder', 'Time (s)', 'Time (display)', 'Movecount', 'TPS', 'Control', 'Style', 'Platform', 'Replay', 'Video', 'Notes', 'Days Held', 'Date']];
     cats.forEach(function (cat) {
       var s = U.getCategoryStats(cat, state.platform);
       var wr = s.currentWR;
@@ -673,7 +673,7 @@
       rows.push([
         cat.name, cat.size || '', wr.player, wr.time, U.fmtTime(wr.time),
         wr.movecount, wr.tps != null ? wr.tps : '',
-        wr.control || '', wr.style || '',
+        wr.control || '', wr.style || '', wr.platform || '',
         wr.replayUrl || '', wr.videoUrl || '',
         notesCombined.join('\n'), days, wr.dateIso || '',
       ]);
