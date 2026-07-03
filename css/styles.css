@@ -45,6 +45,7 @@
   --c-tablet: #ff6b00;     /* vivid orange — Tablet */
   --c-mouse: #3b82f6;     /* blue — Mouse (distinct from tier cyan #00bcd4) */
   --c-keyboard: #fbbf24;  /* gold — Keyboard */
+  --c-touch: #f472b6;     /* pink — Touch */
   --s-fringe: #ff00ff;     /* magenta — Fringe */
   --s-lbl: #cd853f;        /* peru/brown — LBL */
   --s-grids: #9acd32;      /* olive — Grids (base; variants computed inline) */
@@ -1468,10 +1469,11 @@ body.time-travelling::before {
   border: 1px solid transparent;
   white-space: nowrap;
 }
-/* Control: Tablet (orange), Mouse (blue), Keyboard (gold) */
+/* Control: Tablet (orange), Mouse (blue), Keyboard (gold), Touch (pink) */
 .tag-control.ctrl-tablet { background: rgba(255,107,0,0.15); color: var(--c-tablet); border-color: rgba(255,107,0,0.45); }
 .tag-control.ctrl-mouse { background: rgba(59,130,246,0.15); color: var(--c-mouse); border-color: rgba(59,130,246,0.45); }
 .tag-control.ctrl-keyboard { background: rgba(251,191,36,0.15); color: var(--c-keyboard); border-color: rgba(251,191,36,0.45); }
+.tag-control.ctrl-touch { background: rgba(244,114,182,0.15); color: var(--c-touch); border-color: rgba(244,114,182,0.45); }
 .tag-control.ctrl-unknown { background: rgba(128,128,128,0.1); color: var(--text-dim); border-color: var(--border); }
 
 /* Style: Fringe (magenta), LBL (brown), Grids (olive — base).
@@ -2114,9 +2116,9 @@ body.time-travelling::before {
   line-height: 1.4;
 }
 .platform-tag.platform-exe {
-  background: rgba(255,255,255,0.06);
-  color: var(--text-dim);
-  border: 1px solid var(--border);
+  background: rgba(100,181,246,0.12);
+  color: #64b5f6;
+  border: 1px solid rgba(100,181,246,0.35);
 }
 .platform-tag.platform-web {
   background: rgba(255,34,98,0.12);
@@ -2127,11 +2129,6 @@ body.time-travelling::before {
   background: rgba(234,97,136,0.12);
   color: #ea6188;
   border: 1px solid rgba(234,97,136,0.35);
-}
-.platform-tag.platform-touch {
-  background: rgba(255,165,0,0.10);
-  color: #ffa500;
-  border: 1px solid rgba(255,165,0,0.35);
 }
 
 /* ---------- Player page: Victims/Rivals + Active Records layout ---------- */

@@ -900,6 +900,7 @@
     if (v.indexOf('tablet') >= 0) return 'tablet';
     if (v.indexOf('mouse') >= 0) return 'mouse';
     if (v.indexOf('keyboard') >= 0) return 'keyboard';
+    if (v.indexOf('touch') >= 0) return 'touch';
     return 'unknown';
   }
   function styleClass(s) {
