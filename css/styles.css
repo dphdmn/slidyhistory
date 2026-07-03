@@ -2124,9 +2124,14 @@ body.time-travelling::before {
   border: 1px solid rgba(255,34,98,0.35);
 }
 .platform-tag.platform-lm {
-  background: rgba(0,255,0,0.10);
-  color: var(--green);
-  border: 1px solid rgba(0,255,0,0.30);
+  background: rgba(234,97,136,0.12);
+  color: #ea6188;
+  border: 1px solid rgba(234,97,136,0.35);
+}
+.platform-tag.platform-touch {
+  background: rgba(255,165,0,0.10);
+  color: #ffa500;
+  border: 1px solid rgba(255,165,0,0.35);
 }
 
 /* ---------- Player page: Victims/Rivals + Active Records layout ---------- */
