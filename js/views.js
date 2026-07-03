@@ -54,8 +54,17 @@
       yearSpan = y1 === y2 ? y1 : y1 + '–' + y2;
     }
 
+    var platformTitles = {
+      exe: 'Desktop Slidysim WR History',
+      web: 'Web Slidysim WR History',
+      both: 'Overall Slidysim WR History',
+      lm: 'League of Minesweeper WR History',
+      combined: 'Combined Speedsliding WR History'
+    };
+    var pageTitle = platformTitles[state.platform] || 'Slidysim World Records';
+
     c.innerHTML = `
-      <h1 class="page-title">Slidysim <span class="accent">World Records</span></h1>
+      <h1 class="page-title">${esc(pageTitle)}</h1>
       <p class="page-subtitle">${stats.totalRecords} records across ${stats.totalCategories} categories · ${stats.totalPlayers} players · ${yearSpan || 'all time'}</p>
 
       <div class="stat-grid">
@@ -1293,7 +1302,8 @@
    * representations".
    */
   function platformCell(r) {
-    if (state.platform !== 'both' || !r.platform) return '';
+    if (state.platform !== 'both' && state.platform !== 'combined') return '';
+    if (!r.platform) return '';
     return '<span class="platform-tag platform-' + esc(r.platform) + '" title="Record set on the ' + esc(r.platform) + ' platform">' + esc(r.platform) + '</span>';
   }
 
@@ -2077,11 +2087,9 @@
         } else {
           counterHtml = '<span class="snipe-counter" title="active records held">' + cnt.before + '→' + cnt.after + '</span>';
         }
-        // Platform tag — ONLY shown in "both" merged view. Each record carries
-        // a `platform` field ("exe" or "web"). In exe/web-only views the tag
-        // is redundant (every record is the same platform) so we hide it.
+        // Platform tag — shown in "both" and "combined" merged views.
         var platformTag = '';
-        if (state.platform === 'both' && rec.platform) {
+        if ((state.platform === 'both' || state.platform === 'combined') && rec.platform) {
           platformTag = '<span class="platform-tag platform-' + esc(rec.platform) + '" title="Record set on the ' + esc(rec.platform) + ' platform">' + esc(rec.platform) + '</span>';
         }
         shtml += '<div class="snipe-item ' + itemCls + '" data-cat="' + esc(ev.cat.id) + '">' +
@@ -2291,7 +2299,10 @@
     });
   }
 
-  function setPlatform(p) { state.platform = p; }
+  function setPlatform(p) {
+    state.platform = p;
+    if (U.refreshPlayerColors) U.refreshPlayerColors(p);
+  }
   function getPlatform() { return state.platform; }
   function setTheme(t) { state.theme = t; document.documentElement.setAttribute('data-theme', t); }
   function getTheme() { return state.theme; }

@@ -65,24 +65,36 @@
   // Assign a stable color to each player based on their overall record count rank.
   // Top 10 players get tier colors; 11th+ players get distinct SHADES OF GRAY
   // (user request: avoid random colors for >10 players since we only have 11).
+  // Per-platform player color maps: PLAYER_COLORS[platform][name] = color
   var PLAYER_COLORS = {};
+  var _colorPlatform = 'exe';
   // Gray shades for players ranked 11+ — progressively darker.
   var EXTRA_GRAYS = ['#c8c8c8', '#a0a0a0', '#787878', '#5a5a5a', '#909090', '#b0b0b0'];
-  function assignPlayerColors() {
-    var entries = Object.entries(DATA.meta.players);
+  function assignPlayerColors(platform) {
+    var stats = getGlobalStats(platform);
+    var players = stats.players;
+    PLAYER_COLORS[platform] = PLAYER_COLORS[platform] || {};
+    var map = PLAYER_COLORS[platform];
+    var entries = Object.entries(players);
     entries.sort(function(a,b){ return b[1]-a[1]; });
     entries.forEach(function(e, i) {
       if (i < TIER_ORDER.length) {
-        PLAYER_COLORS[e[0]] = TIER_COLORS[TIER_ORDER[i]];
+        map[e[0]] = TIER_COLORS[TIER_ORDER[i]];
       } else {
-        // Shades of gray for 11th+ players — distinct but neutral.
         var idx = i - TIER_ORDER.length;
-        PLAYER_COLORS[e[0]] = EXTRA_GRAYS[idx % EXTRA_GRAYS.length];
+        map[e[0]] = EXTRA_GRAYS[idx % EXTRA_GRAYS.length];
       }
     });
   }
+  function refreshPlayerColors(platform) {
+    _colorPlatform = platform;
+    PLAYER_COLORS[platform] = {};
+    assignPlayerColors(platform);
+  }
   function playerColor(name) {
-    return PLAYER_COLORS[name] || '#888';
+    var map = PLAYER_COLORS[_colorPlatform];
+    if (!map) return '#888';
+    return map[name] || '#888';
   }
 
   /* ---------- Date interpolation for unknown dates ---------- */
@@ -128,10 +140,36 @@
    * sees the loading state and a retry button (handled by app.js init).
    */
   function loadData() {
-    if (window.WR_DATA) {
-      return processData(window.WR_DATA);
+    var orig = window._WR_ORIG || window.WR_DATA;
+    var lmData = window._WR_LM;
+    if (!orig) {
+      throw new Error('WR_DATA not loaded — check that data/wr-data.js is reachable');
     }
-    throw new Error('WR_DATA not loaded — check that data/wr-data.js is reachable');
+    // Clone orig so we don't mutate the saved original.
+    var merged = JSON.parse(JSON.stringify(orig));
+    if (lmData && lmData.categories) {
+      var catMap = {};
+      (merged.categories || []).forEach(function (c) { catMap[c.id] = c; });
+      lmData.categories.forEach(function (lc) {
+        if (catMap[lc.id]) {
+          // Append LM records to existing category (records already tagged platform:"lm")
+          catMap[lc.id].records = catMap[lc.id].records.concat(lc.records);
+        } else {
+          // New category from LM data only
+          merged.categories.push(JSON.parse(JSON.stringify(lc)));
+        }
+      });
+      // Merge dateRange from LM data so the time slider covers LM dates
+      if (lmData.meta && lmData.meta.dateRange && merged.meta && merged.meta.dateRange) {
+        if (lmData.meta.dateRange.min < merged.meta.dateRange.min) {
+          merged.meta.dateRange.min = lmData.meta.dateRange.min;
+        }
+        if (lmData.meta.dateRange.max > merged.meta.dateRange.max) {
+          merged.meta.dateRange.max = lmData.meta.dateRange.max;
+        }
+      }
+    }
+    return processData(merged);
   }
 
   function processData(data) {
@@ -156,7 +194,6 @@
       });
       interpolateDates(c.records);
     });
-    assignPlayerColors();
     return DATA;
   }
 
@@ -229,9 +266,10 @@
     // first played in 2023 is invisible when viewing 2020 — exactly what
     // "as of <date>" means.
     var hasCutoff = TIME_CUTOFF != null;
-    if (platform === 'both') {
+    if (platform === 'both' || platform === 'combined') {
       return CATEGORIES.filter(function (c) {
         return c.records.some(function (r) {
+          if (platform === 'both' && (r.platform || 'exe') === 'lm') return false;
           if (hasCutoff && (r.dateSortKey || 0) > TIME_CUTOFF) return false;
           return true;
         });
@@ -247,7 +285,7 @@
   }
   function filterRecords(cat, platform) {
     var hasCutoff = TIME_CUTOFF != null;
-    if (platform === 'both') {
+    if (platform === 'both' || platform === 'combined') {
       // Lower-envelope (combined WR frontier). Sort by date ascending, walk
       // through keeping a running minimum time, include a record only if its
       // time is strictly less than the running minimum. Stable sort preserves
@@ -258,6 +296,10 @@
       // cutoff moment. A record set after the cutoff is invisible — the user
       // sees the combined-WR history exactly as it stood on that date.
       var all = cat.records.slice();
+      if (platform === 'both') {
+        // "both" excludes LM records (only exe+web frontier)
+        all = all.filter(function (r) { return (r.platform || 'exe') !== 'lm'; });
+      }
       if (hasCutoff) {
         all = all.filter(function (r) { return (r.dateSortKey || 0) <= TIME_CUTOFF; });
       }
@@ -1154,6 +1196,7 @@
   WR.getNow = getNow;
   WR.getCutoffDateRange = getCutoffDateRange;
   WR.playerColor = playerColor;
+  WR.refreshPlayerColors = refreshPlayerColors;
   WR.TIER_COLORS = TIER_COLORS;
   WR.TIER_ORDER = TIER_ORDER;
 

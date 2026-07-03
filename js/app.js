@@ -29,6 +29,7 @@
     var savedPlatform = localStorage.getItem('wr-platform') || 'exe';
     WR.setPlatform(savedPlatform);
     syncPlatformToggle();
+    updateAppTitle();
 
     // footer
     updateFooter();
@@ -113,6 +114,7 @@
         WR.setPlatform(btn.getAttribute('data-platform'));
         localStorage.setItem('wr-platform', btn.getAttribute('data-platform'));
         syncPlatformToggle();
+        updateAppTitle();
         // re-render current view
         var h = WR.getHashParams();
         WR.render(h.route, h.params);
@@ -130,13 +132,12 @@
 
   function updateFooter() {
     var meta = WR.getData().meta;
-    // When time-travelling, the footer/brand-sub counts should reflect the
-    // cutoff-aware state (fewer records & categories in the past), not the
-    // full dataset totals. User: "see leaderboard and all stats/players etc.
-    // as it was for example 2021 and not 2026".
-    var stats = WR.isTimeTravelling()
-      ? WR.getGlobalStats(WR.getPlatform())
-      : null;
+    var platform = WR.getPlatform();
+    // Always use computed stats for LM/Combined views (meta only reflects
+    // original exe+web data). Also use computed stats when time-travelling
+    // to reflect the cutoff-aware state.
+    var useComputed = WR.isTimeTravelling() || platform === 'lm' || platform === 'combined';
+    var stats = useComputed ? WR.getGlobalStats(platform) : null;
     var recCount = stats ? stats.totalRecords : meta.totalRecords;
     var catCount = stats ? stats.totalCategories : meta.totalCategories;
     var sub = document.getElementById('brand-sub');
@@ -148,6 +149,21 @@
     if (statsEl) statsEl.textContent = recCount + ' records';
     var fetched = document.getElementById('footer-fetched');
     if (fetched) fetched.textContent = 'Updated ' + meta.fetchedAt;
+  }
+
+  function updateAppTitle() {
+    var p = WR.getPlatform();
+    var titles = {
+      exe: 'Desktop Slidysim WR History',
+      web: 'Web Slidysim WR History',
+      both: 'Overall Slidysim WR History',
+      lm: 'League of Minesweeper WR History',
+      combined: 'Combined Speedsliding WR History'
+    };
+    var t = titles[p] || 'Slidysim WR History';
+    document.title = t;
+    var el = document.querySelector('.brand-title');
+    if (el) el.textContent = t;
   }
 
   /* ---------- Search ---------- */
@@ -246,8 +262,18 @@
         results.push({ type: 'cat', label: c.name, meta: c.records.length + ' records', route: 'category', params: { id: c.id } });
       }
     });
-    // players
-    var players = WR.getData().meta.players;
+    // players — from meta (exe+web) + scan records (for LM-only players)
+    var players = WR.getData().meta.players || {};
+    var seen = {};
+    Object.keys(players).forEach(function (name) { seen[name] = true; });
+    cats.forEach(function (c) {
+      c.records.forEach(function (r) {
+        if (!seen[r.player]) {
+          seen[r.player] = true;
+          players[r.player] = (players[r.player] || 0) + 1;
+        }
+      });
+    });
     Object.keys(players).forEach(function (name) {
       if (name.toLowerCase().indexOf(q) >= 0) {
         results.push({ type: 'player', label: name, meta: players[name] + ' records', route: 'player', params: { name: name } });

@@ -2123,6 +2123,11 @@ body.time-travelling::before {
   color: var(--pink);
   border: 1px solid rgba(255,34,98,0.35);
 }
+.platform-tag.platform-lm {
+  background: rgba(0,255,0,0.10);
+  color: var(--green);
+  border: 1px solid rgba(0,255,0,0.30);
+}
 
 /* ---------- Player page: Victims/Rivals + Active Records layout ---------- */
 .vr-layout {
