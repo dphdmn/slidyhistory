@@ -992,6 +992,11 @@ body.time-travelling::before {
   margin: 0 auto;
   text-align: left;       /* reset centering for legend's flex layout */
 }
+.chart-scroll {
+  overflow-y: auto;
+  max-height: 500px;
+  -webkit-overflow-scrolling: touch;
+}
 .heatmap-cell {
   transition: opacity 0.15s, stroke-width 0.15s;
   cursor: pointer;

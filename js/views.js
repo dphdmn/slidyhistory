@@ -101,14 +101,14 @@
             <div class="card-title">Current <span class="neon">WRs</span> Held</div>
             <div class="card-actions"><span class="badge badge-cyan">${Object.keys(stats.currentHolders).length} holders</span></div>
           </div>
-          <div id="chart-current-wrs"></div>
+          <div id="chart-current-wrs" class="chart-scroll"></div>
         </div>
         <div class="card">
           <div class="card-header">
             <div class="card-title"><span class="neon">Snipes</span> Leaderboard</div>
             <div class="card-actions"><span class="badge badge-cyan">rival snipes + first documented records</span></div>
           </div>
-          <div id="chart-snipes"></div>
+          <div id="chart-snipes" class="chart-scroll"></div>
         </div>
       </div>
 
@@ -118,7 +118,7 @@
             <div class="card-title">Total <span class="neon">Records</span></div>
             <div class="card-actions"><span class="badge badge-cyan">all entries</span></div>
           </div>
-          <div id="chart-total-records"></div>
+          <div id="chart-total-records" class="chart-scroll"></div>
         </div>
         <div class="card">
           <div class="card-header">
@@ -172,7 +172,7 @@
               <button class="mt-btn active" data-mode="total">Total</button>
               <button class="mt-btn" data-mode="rival">Rival</button>
             </div>
-            <span class="badge badge-gray" id="playercat-count">${Math.min(15, stats.totalPlayers)} players</span>
+            <span class="badge badge-gray" id="playercat-count">${stats.totalPlayers} players</span>
           </div>
         </div>
         <div id="player-cat-heatmap" class="heatmap-wrap"></div>
@@ -186,8 +186,7 @@
     var currentHolders = Object.keys(stats.currentHolders)
       .map(function (name) { return { label: name, value: stats.currentHolders[name], color: U.playerColor(name) }; })
       .filter(function (i) { return i.value > 0; })
-      .sort(function (a, b) { return b.value - a.value; })
-      .slice(0, 15);
+      .sort(function (a, b) { return b.value - a.value; });
     U.barChart(document.getElementById('chart-current-wrs'), currentHolders, {
       onBarClick: function (item) { U.setHash('player', { name: item.label }); },
       onLabelClick: function (item) { U.setHash('player', { name: item.label }); },
@@ -198,8 +197,7 @@
       var sp = U.getPlayerSnipes(name, state.platform);
       return { label: name, value: sp.count, color: U.playerColor(name), sub: sp.count + ' snipes' };
     }).filter(function (i) { return i.value > 0; })
-      .sort(function (a, b) { return b.value - a.value; })
-      .slice(0, 15);
+      .sort(function (a, b) { return b.value - a.value; });
     U.barChart(document.getElementById('chart-snipes'), snipeItems, {
       onBarClick: function (item) { U.setHash('player', { name: item.label }); },
       onLabelClick: function (item) { U.setHash('player', { name: item.label }); },
@@ -208,7 +206,7 @@
     // Total records
     var totalItems = Object.keys(stats.players).map(function (name) {
       return { label: name, value: stats.players[name], color: U.playerColor(name) };
-    }).sort(function (a, b) { return b.value - a.value; }).slice(0, 15);
+    }).sort(function (a, b) { return b.value - a.value; });
     U.barChart(document.getElementById('chart-total-records'), totalItems, {
       onBarClick: function (item) { U.setHash('player', { name: item.label }); },
       onLabelClick: function (item) { U.setHash('player', { name: item.label }); },
@@ -231,7 +229,7 @@
       WR.activityHeatmap(document.getElementById('activity-heatmap'), state.platform, { mode: activityMode });
     }
     function renderPlayerCat() {
-      WR.playerCategoryHeatmap(document.getElementById('player-cat-heatmap'), state.platform, 15, { mode: playerCatMode });
+      WR.playerCategoryHeatmap(document.getElementById('player-cat-heatmap'), state.platform, null, { mode: playerCatMode });
     }
 
     renderVelocity();

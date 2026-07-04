@@ -60,8 +60,8 @@
         pcounts[r.player] = (pcounts[r.player] || 0) + 1;
       });
     });
-    var topPlayers = Object.keys(pcounts).sort(function (a, b) { return pcounts[b] - pcounts[a]; })
-      .slice(0, topN || 15);
+    var topPlayers = Object.keys(pcounts).sort(function (a, b) { return pcounts[b] - pcounts[a]; });
+    if (topN != null) topPlayers = topPlayers.slice(0, topN);
 
     // Build a lookup of category by name (for click handler).
     var catByName = {};
