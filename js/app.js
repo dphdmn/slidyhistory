@@ -31,6 +31,13 @@
     syncPlatformToggle();
     updateAppTitle();
 
+    // expanded palette
+    if (localStorage.getItem('wr-expanded-palette') === 'true') {
+      WR.toggleExpandedPalette();
+      WR.refreshPlayerColors(WR.getPlatform());
+    }
+    syncPaletteToggle();
+
     // footer
     updateFooter();
 
@@ -39,6 +46,7 @@
     setupSearch();
     setupModal();
     setupPlatformToggle();
+    setupPaletteToggle();
     setupTimeSlider();
 
     // route
@@ -128,6 +136,25 @@
     document.querySelectorAll('.plt-btn').forEach(function (btn) {
       btn.classList.toggle('active', btn.getAttribute('data-platform') === p);
     });
+  }
+
+  function setupPaletteToggle() {
+    var btn = document.getElementById('palette-toggle');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var on = WR.toggleExpandedPalette();
+      localStorage.setItem('wr-expanded-palette', on);
+      WR.refreshPlayerColors(WR.getPlatform());
+      syncPaletteToggle();
+      var h = WR.getHashParams();
+      WR.render(h.route, h.params);
+    });
+  }
+  function syncPaletteToggle() {
+    var btn = document.getElementById('palette-toggle');
+    if (!btn) return;
+    btn.classList.toggle('active', WR.isExpandedPalette());
+    btn.title = WR.isExpandedPalette() ? 'Collapse color palette' : 'Expand color palette';
   }
 
   function updateFooter() {

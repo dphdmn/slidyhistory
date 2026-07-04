@@ -169,6 +169,7 @@ body {
   transition: all 0.2s;
 }
 .icon-btn:hover { color: var(--text); border-color: var(--border-bright); background: rgba(255,255,255,0.03); }
+.icon-btn.active { color: var(--cyan); border-color: var(--cyan); background: rgba(0,188,212,0.08); }
 .icon-btn svg { display: block; }
 
 .platform-toggle {

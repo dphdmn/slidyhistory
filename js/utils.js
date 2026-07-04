@@ -62,8 +62,55 @@
   };
   var TIER_ORDER = ['alpha','beta','gamma','delta','epsilon','zeta','eta','theta','iota','kappa'];
 
+  /* ---------- Expanded palette (from example.txt) ----------
+   * 24 tiers. Used when the expanded palette toggle is on.
+   */
+  var EXPANDED_ORDER = [
+    'ascended',
+    'grandmaster-iii','grandmaster-ii','grandmaster-i',
+    'master-iii','master-ii','master-i',
+    'diamond-iii','diamond-ii','diamond-i',
+    'platinum-iii','platinum-ii','platinum-i',
+    'gold-iii','gold-ii','gold-i',
+    'silver-iii','silver-ii','silver-i',
+    'bronze-iii','bronze-ii','bronze-i',
+    'beginner','unranked',
+  ];
+  var EXPANDED_COLORS = {
+    ascended:         '#890000',
+    'grandmaster-iii': '#ff00ff',
+    'grandmaster-ii':  '#ff66ff',
+    'grandmaster-i':   '#ff92ff',
+    'master-iii':      '#8000ff',
+    'master-ii':       '#9f3dff',
+    'master-i':        '#ad7eff',
+    'diamond-iii':     '#0080ff',
+    'diamond-ii':      '#47a1fb',
+    'diamond-i':       '#70b9ff',
+    'platinum-iii':    '#00d269',
+    'platinum-ii':     '#79e389',
+    'platinum-i':      '#b9ffa3',
+    'gold-iii':        '#ffd700',
+    'gold-ii':         '#ffe85f',
+    'gold-i':          '#fffa74',
+    'silver-iii':      '#c0c0c0',
+    'silver-ii':       '#d9d9d9',
+    'silver-i':        '#e8e8e8',
+    'bronze-iii':      '#cd7f32',
+    'bronze-ii':       '#e39b53',
+    'bronze-i':        '#ffb368',
+    'beginner':        '#c9daf8',
+    'unranked':        '#666666',
+  };
+
+  var _expandedPalette = false;
+  function getActiveOrder() { return _expandedPalette ? EXPANDED_ORDER : TIER_ORDER; }
+  function getActiveColors() { return _expandedPalette ? EXPANDED_COLORS : TIER_COLORS; }
+  function toggleExpandedPalette() { _expandedPalette = !_expandedPalette; return _expandedPalette; }
+  function isExpandedPalette() { return _expandedPalette; }
+
   // Assign a stable color to each player based on their overall record count rank.
-  // Top 10 players get tier colors; 11th+ players get distinct SHADES OF GRAY
+  // Top N players get tier colors; remaining players get distinct SHADES OF GRAY.
   // (user request: avoid random colors for >10 players since we only have 11).
   // Per-platform player color maps: PLAYER_COLORS[platform][name] = color
   var PLAYER_COLORS = {};
@@ -77,11 +124,13 @@
     var map = PLAYER_COLORS[platform];
     var entries = Object.entries(players);
     entries.sort(function(a,b){ return b[1]-a[1]; });
+    var order = getActiveOrder();
+    var colors = getActiveColors();
     entries.forEach(function(e, i) {
-      if (i < TIER_ORDER.length) {
-        map[e[0]] = TIER_COLORS[TIER_ORDER[i]];
+      if (i < order.length) {
+        map[e[0]] = colors[order[i]];
       } else {
-        var idx = i - TIER_ORDER.length;
+        var idx = i - order.length;
         map[e[0]] = EXTRA_GRAYS[idx % EXTRA_GRAYS.length];
       }
     });
@@ -1200,6 +1249,12 @@
   WR.refreshPlayerColors = refreshPlayerColors;
   WR.TIER_COLORS = TIER_COLORS;
   WR.TIER_ORDER = TIER_ORDER;
+  WR.EXPANDED_COLORS = EXPANDED_COLORS;
+  WR.EXPANDED_ORDER = EXPANDED_ORDER;
+  WR.toggleExpandedPalette = toggleExpandedPalette;
+  WR.isExpandedPalette = isExpandedPalette;
+  WR.getActiveOrder = getActiveOrder;
+  WR.getActiveColors = getActiveColors;
 
   WR.fmt = fmt;
   WR.fmtTime = fmtTime;

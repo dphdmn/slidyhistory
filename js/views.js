@@ -1554,8 +1554,8 @@
     var selected = selectedIds.map(function (id) { return U.getCategory(id); }).filter(Boolean);
     var series = selected.map(function (cat, i) {
       var color;
-      if (i < U.TIER_ORDER.length) color = U.TIER_COLORS[U.TIER_ORDER[i]];
-      else { var grays = ['#c8c8c8', '#a0a0a0', '#787878', '#5a5a5a']; color = grays[(i - U.TIER_ORDER.length) % grays.length]; }
+      if (i < U.getActiveOrder().length) color = U.getActiveColors()[U.getActiveOrder()[i]];
+      else { var grays = ['#c8c8c8', '#a0a0a0', '#787878', '#5a5a5a']; color = grays[(i - U.getActiveOrder().length) % grays.length]; }
       var points = U.filterRecords(cat, state.platform)
         .filter(function (r) { return r.time != null && r.dateSortKey > 0; })
         .map(function (r) { return { x: r.dateSortKey, y: r.time, rec: r }; });
@@ -1578,8 +1578,8 @@
         '</tr></thead><tbody>';
       selected.forEach(function (cat, i) {
         var color;
-        if (i < U.TIER_ORDER.length) color = U.TIER_COLORS[U.TIER_ORDER[i]];
-        else { var grays = ['#c8c8c8', '#a0a0a0', '#787878', '#5a5a5a']; color = grays[(i - U.TIER_ORDER.length) % grays.length]; }
+        if (i < U.getActiveOrder().length) color = U.getActiveColors()[U.getActiveOrder()[i]];
+        else { var grays = ['#c8c8c8', '#a0a0a0', '#787878', '#5a5a5a']; color = grays[(i - U.getActiveOrder().length) % grays.length]; }
         var s = U.getCategoryStats(cat, state.platform);
         var wr = s.currentWR;
         html += '<tr>' +
